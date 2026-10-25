@@ -1,0 +1,19 @@
+# gitleaks configuration. Uses the default rule set; add allowlists only for
+# deliberate test fixtures, each with a comment saying why.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Local environments, caches and build output. Gitignored, never committed."
+paths = [
+  '''(^|[\/])\.venv[\/]''',
+  '''(^|[\/])\.nox[\/]''',
+  '''(^|[\/])\.tools[\/]''',
+  '''(^|[\/])ci-logs[\/]''',
+  '''(^|[\/])node_modules[\/]''',
+  '''(^|[\/])dist[\/]''',
+  '''(^|[\/])\.git[\/]''',
+  '''(^|[\/])\.omc[\/]''',
+  '''(^|[\/])\.(mypy|ruff|pytest)_cache[\/]''',
+  '''(^|[\/])\.hypothesis[\/]''',
+]

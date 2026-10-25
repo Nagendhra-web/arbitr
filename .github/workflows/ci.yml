@@ -1,0 +1,21 @@
+# Mirrors `make ci-docker`. Manual trigger only, so no Actions minutes are used
+# Run it locally with `make act`.
+# To enable push CI on a public repo later, add `push:` under `on:`.
+name: ci
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Full CI in the pinned image
+        run: make ci-docker

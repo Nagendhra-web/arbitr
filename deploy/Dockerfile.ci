@@ -1,0 +1,55 @@
+# Pinned CI image so local Linux CI is reproducible on any host
+# (make ci-docker). Every base image is pinned by digest and
+# every downloaded tool by version and sha256.
+FROM ghcr.io/astral-sh/uv:0.12.0@sha256:606e70c71c852d03f611b1e56a195d08648507018a7057fab82c4974c4eae105 AS uv
+FROM docker:29-cli@sha256:5e6baf67325a79f64ed3bed6863954d5e05d0f3d4e57cbdb14809346814bbfdb AS dockercli
+
+FROM python:3.12-slim-bookworm@sha256:6a0e06f5ba0b373d051aabd3fffb9b873f27f9a2a3a14bcbe37dee6f0e3bbc70
+
+ARG GITLEAKS_VERSION=8.30.1
+ARG GITLEAKS_SHA256=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+ARG OSV_VERSION=2.7.0
+ARG OSV_SHA256=160c6253e2922e9e0a6a9771c5c4c40a4b3c6090b34a3cdd5e80c96cc2e4218b
+ARG TLA_VERSION=1.7.4
+ARG TLA_SHA256=936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      bash ca-certificates curl git make openjdk-17-jre-headless \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY --from=uv /uv /uvx /usr/local/bin/
+COPY --from=dockercli /usr/local/bin/docker /usr/local/bin/docker
+COPY --from=dockercli /usr/local/libexec/docker/cli-plugins/docker-compose /usr/local/libexec/docker/cli-plugins/docker-compose
+
+RUN set -eux; \
+    curl -sSfL -o /tmp/gitleaks.tgz "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"; \
+    echo "${GITLEAKS_SHA256}  /tmp/gitleaks.tgz" | sha256sum -c -; \
+    tar -xzf /tmp/gitleaks.tgz -C /usr/local/bin gitleaks; \
+    curl -sSfL -o /usr/local/bin/osv-scanner "https://github.com/google/osv-scanner/releases/download/v${OSV_VERSION}/osv-scanner_linux_amd64"; \
+    echo "${OSV_SHA256}  /usr/local/bin/osv-scanner" | sha256sum -c -; \
+    chmod +x /usr/local/bin/osv-scanner; \
+    mkdir -p /opt/tla; \
+    curl -sSfL -o /opt/tla/tla2tools.jar "https://github.com/tlaplus/tlaplus/releases/download/v${TLA_VERSION}/tla2tools.jar"; \
+    echo "${TLA_SHA256}  /opt/tla/tla2tools.jar" | sha256sum -c -; \
+    rm -f /tmp/gitleaks.tgz
+
+ENV UV_PROJECT_ENVIRONMENT=/opt/venv \
+    UV_PYTHON_INSTALL_DIR=/opt/uv-python \
+    UV_LINK_MODE=copy \
+    UV_CACHE_DIR=/opt/uv-cache \
+    ARBITR_TLA_JAR=/opt/tla/tla2tools.jar \
+    PYTHONDONTWRITEBYTECODE=1
+
+RUN uv python install 3.11 3.12 3.13
+
+WORKDIR /repo
+# Dependencies first, so source edits do not invalidate this layer.
+COPY pyproject.toml uv.lock .python-version README.md LICENSE ./
+RUN uv sync --locked --all-extras --no-install-project
+
+COPY . /repo
+RUN git config --global --add safe.directory /repo \
+ && git config --global core.fileMode false
+
+CMD ["make", "ci"]

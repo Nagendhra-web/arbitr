@@ -1,0 +1,26 @@
+# Mirrors scripts/release.sh. Manual trigger only.
+# Releases are normally cut locally; this file exists so the hosted path stays
+# in sync with the script.
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      test:
+        description: "Publish to TestPyPI and a test image tag only"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Release
+        run: bash scripts/release.sh ${{ inputs.test && '--test' || '' }}

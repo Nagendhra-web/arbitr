@@ -1,0 +1,21 @@
+.venv
+.nox
+.tools
+ci-logs
+dist
+build
+node_modules
+**/__pycache__
+.mypy_cache
+.ruff_cache
+.pytest_cache
+.hypothesis
+.omc
+# Secrets and local state must never be baked into an image.
+.env
+.env.*
+*.pem
+*.key
+bench/.spend.json
+.coverage
+.coverage.*

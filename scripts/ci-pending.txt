@@ -1,0 +1,11 @@
+# Suites and stages that are allowed to be PENDING in `make ci` because the
+# feature they test is not built yet.
+# Format: <suite id> <reason>
+# Remove a line as soon as the suite has tests. CI fails when a listed suite
+# already has tests, and when an unlisted suite has none.
+property     property tests arrive with the core ledger
+fault        fault injection harness arrives with the executor
+mcp          MCP proxy tests arrive with the proxy
+bench        scripted bench arrives with the fakes and scenarios
+perf         perf script and baseline arrive with the bench
+typescript   TypeScript client arrives with the HTTP API

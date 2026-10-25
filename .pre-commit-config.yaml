@@ -1,0 +1,68 @@
+# Git hooks. Install with `make setup`.
+# All hooks are local and run tools pinned in uv.lock, so no hook code is
+# fetched from the network. Never bypass them with --no-verify.
+default_install_hook_types: [pre-commit, commit-msg, pre-push]
+default_stages: [pre-commit]
+# Stop at the first failing hook, so a refused push never runs the full CI first.
+fail_fast: true
+repos:
+  - repo: local
+    hooks:
+      - id: owner-author
+        name: commit author is the owner
+        entry: bash scripts/check_author.sh
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: check-yaml
+        name: check yaml
+        entry: uv run --locked check-yaml
+        language: system
+        types: [yaml]
+        exclude: ^mkdocs\.yml$
+      - id: check-toml
+        name: check toml
+        entry: uv run --locked check-toml
+        language: system
+        types: [toml]
+      - id: check-added-large-files
+        name: check for large files
+        entry: uv run --locked check-added-large-files --maxkb=500
+        language: system
+        exclude: ^uv\.lock$  # the lock file is large by nature and must be committed
+      - id: no-em-dash
+        name: no em dashes
+        entry: bash scripts/check_no_em_dash.sh
+        language: system
+        types: [text]
+      - id: gitleaks
+        name: gitleaks (staged changes)
+        entry: bash scripts/with_env.sh gitleaks git --pre-commit --staged --redact --no-banner --config .gitleaks.toml
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: ci-fast
+        name: make ci-fast (ruff, format, mypy, unit tests)
+        entry: make ci-fast
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: commit-msg
+        name: commit message rules
+        entry: bash scripts/check_commit_msg.sh
+        language: system
+        stages: [commit-msg]
+      - id: push-approval
+        name: owner approved this push
+        entry: bash scripts/pre_push_guard.sh
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]
+      - id: ci-full
+        name: make ci (full local pipeline)
+        entry: make ci
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]

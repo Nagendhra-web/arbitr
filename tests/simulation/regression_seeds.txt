@@ -1,0 +1,2 @@
+# Seeds that once failed. One per line, optional comment after #.
+# Every seed here runs first in every simulation run.

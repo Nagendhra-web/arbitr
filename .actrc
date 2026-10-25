@@ -1,0 +1,3 @@
+-P ubuntu-latest=catthehacker/ubuntu@sha256:3488f78aa97770c8d5d835f2913c1a782d3121ad3f2aafb17054fb1d554ea4e1
+--pull=false
+--container-daemon-socket /var/run/docker.sock

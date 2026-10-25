@@ -1,0 +1,21 @@
+# Local services for tests.
+# Postgres is published on 55432 so it never clashes with a Postgres from
+# another project on 5432.
+name: arbitr
+
+services:
+  postgres:
+    image: postgres:16-alpine@sha256:f4610795587492cd4fb887c2dc3de301b813278bb6f616992061141b5f15ac36
+    environment:
+      POSTGRES_USER: arbitr
+      POSTGRES_PASSWORD: arbitr  # test-only credential, local container
+      POSTGRES_DB: arbitr_test
+    ports:
+      - "127.0.0.1:55432:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U arbitr -d arbitr_test"]
+      interval: 1s
+      timeout: 3s
+      retries: 30

@@ -1,0 +1,155 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "arbitr"
+version = "0.1.0.dev0"
+description = "Open source action ledger and safety gate for AI agents. Stops destructive actions, prevents duplicate side effects, and gives every action a receipt."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+authors = [{ name = "nagendhra-web" }]
+keywords = ["ai-agents", "safety", "idempotency", "ledger", "policy", "mcp"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Typing :: Typed",
+]
+dependencies = [
+    "pydantic>=2.7",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+cli = ["typer>=0.12", "rich>=13.7"]
+server = ["fastapi>=0.115", "uvicorn>=0.30"]
+postgres = ["psycopg[binary]>=3.2", "psycopg-pool>=3.2"]
+mcp = ["mcp>=1.9"]
+anthropic = ["anthropic>=0.40"]
+openai-agents = ["openai-agents>=0.1"]
+langgraph = ["langgraph>=0.2"]
+otel = ["opentelemetry-api>=1.27"]
+sql = ["sqlglot>=25"]
+sign = ["cryptography>=43"]
+all = [
+    "arbitr[cli,server,postgres,mcp,anthropic,openai-agents,langgraph,otel,sql,sign]",
+]
+
+[project.scripts]
+arbitr = "arbitr.cli.main:main"
+
+[project.urls]
+Homepage = "https://github.com/nagendhra-web/arbitr"
+Issues = "https://github.com/nagendhra-web/arbitr/issues"
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15",
+    "mypy>=1.13",
+    "types-PyYAML>=6.0",
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "pytest-xdist>=3.6",
+    "pytest-cov>=6.0",
+    "pytest-timeout>=2.3",
+    "hypothesis>=6.115",
+    "pre-commit>=4.0",
+    "pre-commit-hooks>=5.0",
+    "pip-audit>=2.7",
+    "bandit>=1.8",
+    "nox>=2024.10.9",
+    "mkdocs>=1.6",
+    "mkdocs-material>=9.5",
+    "twine>=6.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/arbitr"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/arbitr", "tests", "README.md", "LICENSE", "CHANGELOG.md"]
+
+[tool.uv]
+default-groups = ["dev"]
+
+# ---------------------------------------------------------------- ruff
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests", "bench", "scripts"]
+extend-exclude = [".tools", "ci-logs", "clients"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W", "F", "I", "N", "UP", "ANN", "B", "S", "SIM", "PT", "RUF",
+    "PL", "C4", "C90", "RET", "PIE", "PERF", "TID", "TC", "BLE", "A", "DTZ",
+    "ISC", "ICN", "LOG", "G", "T20", "ERA", "PGH", "TRY", "FBT", "D",
+]
+ignore = [
+    "D203",   # conflicts with D211
+    "D213",   # conflicts with D212
+    "TRY003", # long messages in exceptions are fine, errors carry plain-English text
+    "ISC001", # conflicts with the formatter
+]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "D", "ANN401", "PLR2004", "FBT", "S603", "S607", "TC", "INP001"]
+"tests/simulation/run.py" = ["T20"]
+"bench/**" = ["D", "T20", "PLR2004"]
+"scripts/**" = ["D", "T20", "S101", "S603", "S607", "INP001"]
+"noxfile.py" = ["D", "INP001"]
+"src/arbitr/cli/**" = ["FBT", "B008"]
+
+# ---------------------------------------------------------------- mypy
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unreachable = true
+disallow_any_explicit = false
+files = ["src"]
+
+# ---------------------------------------------------------------- pytest
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+addopts = ["-ra", "--strict-markers", "--strict-config", "--import-mode=importlib"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+timeout = 300
+xfail_strict = true
+filterwarnings = ["error"]
+markers = [
+    "backend: runs against the backend in ARBITR_TEST_BACKEND (sqlite or postgres)",
+    "slow: long running, excluded from ci-fast",
+]
+
+# ---------------------------------------------------------------- coverage
+[tool.coverage.run]
+source = ["arbitr"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "@overload",
+]
+
+# ---------------------------------------------------------------- bandit
+[tool.bandit]
+exclude_dirs = ["tests", "bench"]
