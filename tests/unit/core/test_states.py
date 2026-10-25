@@ -95,9 +95,11 @@ def test_execution_needs_an_allow_or_an_approval_first() -> None:
     """Nothing reaches EXECUTING straight from PROPOSED or PENDING_APPROVAL."""
     assert {a for a, b in TRANSITIONS if b == IntentState.EXECUTING} == {
         IntentState.APPROVED,
+        IntentState.SCHEDULED,  # only reachable from APPROVED
         IntentState.FAILED,
         IntentState.UNKNOWN,
     }
+    assert {a for a, b in TRANSITIONS if b == IntentState.SCHEDULED} == {IntentState.APPROVED}
 
 
 def test_error_code() -> None:

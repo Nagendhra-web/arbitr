@@ -16,6 +16,8 @@ import pytest
 
 # Shared helpers (tests/shellutil.py) import as plain modules.
 sys.path.insert(0, str(Path(__file__).parent))
+# The repository root, so tests can import the bench fakes (bench/fakes).
+sys.path.insert(1, str(Path(__file__).parent.parent))
 
 _skipped: set[str] = set()
 

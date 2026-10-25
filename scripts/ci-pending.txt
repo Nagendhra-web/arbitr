@@ -3,8 +3,8 @@
 # Format: <suite id> <reason>
 # Remove a line as soon as the suite has tests. CI fails when a listed suite
 # already has tests, and when an unlisted suite has none.
-fault        fault injection harness arrives with the executor
 mcp          MCP proxy tests arrive with the proxy
 bench        scripted bench arrives with the fakes and scenarios
 perf         perf script and baseline arrive with the bench
 typescript   TypeScript client arrives with the HTTP API
+executor-postgres  executor suites run on SQLite only until the Postgres backend lands

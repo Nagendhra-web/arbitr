@@ -196,3 +196,27 @@ cases:
     tool: shell.run
     args: { command: "gh api --method PUT orgs/octo/actions/secrets/TOKEN -f encrypted_value=x" }
     expect: require_approval
+  - name: deleting a repository through gh api with a trailing slash is denied
+    tool: shell.run
+    effect: write
+    args: { command: "gh api -X DELETE repos/octo/app/" }
+    expect: deny
+    expect_rule: github.no-repo-delete-api
+  - name: deleting a repository through gh api with doubled slashes is denied
+    tool: shell.run
+    effect: write
+    args: { command: "gh api -X DELETE repos//octo//app" }
+    expect: deny
+    expect_rule: github.no-repo-delete-api
+  - name: deleting a repository through gh api with dot segments is denied
+    tool: shell.run
+    effect: write
+    args: { command: "gh api -X DELETE repos/octo/./app/x/.." }
+    expect: deny
+    expect_rule: github.no-repo-delete-api
+  - name: deleting a repository through gh api with an encoded slash is denied
+    tool: shell.run
+    effect: write
+    args: { command: "gh api -X DELETE repos/octo%2Fapp" }
+    expect: deny
+    expect_rule: github.no-repo-delete-api

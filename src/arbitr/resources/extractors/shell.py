@@ -22,12 +22,13 @@ Example:
 
 from __future__ import annotations
 
+import posixpath
 import re
 import shlex
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Final
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 from arbitr.resources.base import Extraction, make_ref
 from arbitr.resources.extractors.paths import looks_like_path, path_ref
@@ -1107,11 +1108,17 @@ def _gh_api_call(args: list[str]) -> tuple[str, str]:
 
 
 def _gh_api_path(endpoint: str) -> str:
-    """``repos/o/r`` from ``/repos/o/r``, a full API URL, or GitHub Enterprise's ``/api/v3``."""
+    """``repos/o/r`` from ``/repos/o/r``, a full API URL, or GitHub Enterprise's ``/api/v3``.
+
+    The path is decoded and normalized (repeated and trailing slashes, ``.``
+    and ``..`` segments), so ``repos//o/r/`` or ``repos/o%2Fr`` match the same
+    policy globs as ``repos/o/r``.
+    """
     if "://" in endpoint:
         endpoint = urlsplit(endpoint).path
-    endpoint = endpoint.split("?", 1)[0].split("#", 1)[0].lstrip("/")
-    return endpoint.removeprefix("api/v3/")
+    endpoint = unquote(endpoint.split("?", 1)[0].split("#", 1)[0])
+    path = posixpath.normpath("/" + endpoint).lstrip("/")
+    return path.removeprefix("api/v3/")
 
 
 def _gh(args: list[str], depth: int) -> Extraction:

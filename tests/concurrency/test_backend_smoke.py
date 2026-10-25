@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -23,9 +24,11 @@ def test_backend_accepts_concurrent_unique_inserts(tmp_path: Path) -> None:
     """Many threads race to insert one key. Exactly one wins."""
     if BACKEND == "sqlite":
         path = tmp_path / "ledger.db"
-        with sqlite3.connect(path) as conn:
+        # sqlite3's own context manager only commits; closing() also closes.
+        with closing(sqlite3.connect(path)) as conn:
             assert conn.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
             conn.execute("CREATE TABLE k (key TEXT PRIMARY KEY)")
+            conn.commit()
 
         def attempt(_: int) -> bool:
             conn = sqlite3.connect(path, timeout=30)

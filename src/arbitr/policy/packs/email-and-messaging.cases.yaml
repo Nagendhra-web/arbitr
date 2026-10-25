@@ -82,7 +82,7 @@ cases:
     effect: external_comm
     args: { bcc: ["u0@example.com", "u1@example.com", "u2@example.com", "u3@example.com", "u4@example.com", "u5@example.com", "u6@example.com", "u7@example.com", "u8@example.com", "u9@example.com", "u10@example.com", "u11@example.com", "u12@example.com", "u13@example.com", "u14@example.com", "u15@example.com", "u16@example.com", "u17@example.com", "u18@example.com", "u19@example.com", "u20@example.com", "u21@example.com", "u22@example.com", "u23@example.com", "u24@example.com", "u25@example.com", "u26@example.com", "u27@example.com", "u28@example.com", "u29@example.com", "u30@example.com", "u31@example.com", "u32@example.com", "u33@example.com", "u34@example.com", "u35@example.com", "u36@example.com", "u37@example.com", "u38@example.com", "u39@example.com", "u40@example.com", "u41@example.com", "u42@example.com", "u43@example.com", "u44@example.com", "u45@example.com", "u46@example.com", "u47@example.com", "u48@example.com", "u49@example.com", "u50@example.com"], body: "news" }
     expect: require_approval
-    expect_rule: email-and-messaging.many-bcc
+    expect_rule: email-and-messaging.many-recipients
   - name: more than 50 recipients needs approval
     tool: email.send
     effect: external_comm
@@ -168,3 +168,25 @@ cases:
     effect: external_comm
     args: { to: "x@example.com", body: "Order 4155550100 shipped 2026-10-25, invoice INV-2026-000123, total 1,234.56 USD." }
     expect: allow
+  - name: recipients add up across to, cc and bcc
+    tool: email.send
+    effect: external_comm
+    args: { to: ["t0@example.com", "t1@example.com", "t2@example.com", "t3@example.com", "t4@example.com", "t5@example.com", "t6@example.com", "t7@example.com", "t8@example.com", "t9@example.com", "t10@example.com", "t11@example.com", "t12@example.com", "t13@example.com", "t14@example.com", "t15@example.com", "t16@example.com", "t17@example.com", "t18@example.com", "t19@example.com"], cc: ["c0@example.com", "c1@example.com", "c2@example.com", "c3@example.com", "c4@example.com", "c5@example.com", "c6@example.com", "c7@example.com", "c8@example.com", "c9@example.com", "c10@example.com", "c11@example.com", "c12@example.com", "c13@example.com", "c14@example.com", "c15@example.com", "c16@example.com", "c17@example.com", "c18@example.com", "c19@example.com"], bcc: ["b0@example.com", "b1@example.com", "b2@example.com", "b3@example.com", "b4@example.com", "b5@example.com", "b6@example.com", "b7@example.com", "b8@example.com", "b9@example.com", "b10@example.com", "b11@example.com", "b12@example.com", "b13@example.com", "b14@example.com", "b15@example.com", "b16@example.com", "b17@example.com", "b18@example.com", "b19@example.com"], body: "news" }
+    expect: require_approval
+    expect_rule: email-and-messaging.many-recipients
+  - name: a recipient listed in to and cc counts once
+    tool: email.send
+    effect: external_comm
+    args: { to: ["u0@example.com", "u1@example.com", "u2@example.com", "u3@example.com", "u4@example.com", "u5@example.com", "u6@example.com", "u7@example.com", "u8@example.com", "u9@example.com", "u10@example.com", "u11@example.com", "u12@example.com", "u13@example.com", "u14@example.com", "u15@example.com", "u16@example.com", "u17@example.com", "u18@example.com", "u19@example.com", "u20@example.com", "u21@example.com", "u22@example.com", "u23@example.com", "u24@example.com", "u25@example.com", "u26@example.com", "u27@example.com", "u28@example.com", "u29@example.com"], cc: ["u0@example.com", "u1@example.com", "u2@example.com", "u3@example.com", "u4@example.com", "u5@example.com", "u6@example.com", "u7@example.com", "u8@example.com", "u9@example.com", "u10@example.com", "u11@example.com", "u12@example.com", "u13@example.com", "u14@example.com", "u15@example.com", "u16@example.com", "u17@example.com", "u18@example.com", "u19@example.com", "u20@example.com", "u21@example.com", "u22@example.com", "u23@example.com", "u24@example.com", "u25@example.com", "u26@example.com", "u27@example.com", "u28@example.com", "u29@example.com"], body: "news" }
+    expect: allow
+  - name: a long recipient string is counted by address, not by length
+    tool: email.send
+    effect: external_comm
+    args: { to: "Alexandra Longname <alexandra.longname@example.com>, Bartholomew Smith <bartholomew.smith@example.com>", body: "hi" }
+    expect: allow
+  - name: many recipients in one string need approval
+    tool: email.send
+    effect: external_comm
+    args: { to: "s0@example.com, s1@example.com, s2@example.com, s3@example.com, s4@example.com, s5@example.com, s6@example.com, s7@example.com, s8@example.com, s9@example.com, s10@example.com, s11@example.com, s12@example.com, s13@example.com, s14@example.com, s15@example.com, s16@example.com, s17@example.com, s18@example.com, s19@example.com, s20@example.com, s21@example.com, s22@example.com, s23@example.com, s24@example.com, s25@example.com, s26@example.com, s27@example.com, s28@example.com, s29@example.com, s30@example.com, s31@example.com, s32@example.com, s33@example.com, s34@example.com, s35@example.com, s36@example.com, s37@example.com, s38@example.com, s39@example.com, s40@example.com, s41@example.com, s42@example.com, s43@example.com, s44@example.com, s45@example.com, s46@example.com, s47@example.com, s48@example.com, s49@example.com, s50@example.com", body: "news" }
+    expect: require_approval
+    expect_rule: email-and-messaging.many-recipients

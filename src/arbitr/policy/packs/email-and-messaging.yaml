@@ -30,13 +30,7 @@ rules:
   - id: email-and-messaging.many-recipients
     when:
       effect: external_comm
-      args: [{ path: "$.to", op: len_gt, value: 50 }]
-    then: require_approval
-    reason: Messages to more than 50 recipients need a human.
-  - id: email-and-messaging.many-bcc
-    when:
-      effect: external_comm
-      args: [{ path: "$.bcc", op: len_gt, value: 50 }]
+      resource_count_gt: { kind: email, value: 50 }
     then: require_approval
     reason: Messages to more than 50 recipients need a human.
   - id: email-and-messaging.mass-email

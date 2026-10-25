@@ -205,7 +205,20 @@ s_fault_concurrency() {
   [ "$STAGE_PENDING" -eq 1 ] && return 0
   start_postgres || return 1
   echo "-- backend: sqlite" && ARBITR_TEST_BACKEND=sqlite pytest_run "${READY_DIRS[@]}" -q || return 1
-  echo "-- backend: postgres" && ARBITR_TEST_BACKEND=postgres pytest_run "${READY_DIRS[@]}" -q
+  # Executor suites marked sqlite_only cannot run on Postgres until the executor
+  # stores its ledger there; they show as a listed pending item, never a skip.
+  local marked=0
+  grep -rlq --include='*.py' "mark.sqlite_only" tests && marked=1
+  if [ "$marked" -eq 1 ] && ! is_pending executor-postgres; then
+    echo "FAIL: tests marked sqlite_only need 'executor-postgres' in $CI_PENDING_FILE." >&2
+    return 1
+  fi
+  if [ "$marked" -eq 0 ] && is_pending executor-postgres; then
+    echo "FAIL: no test is marked sqlite_only; remove 'executor-postgres' from $CI_PENDING_FILE." >&2
+    return 1
+  fi
+  add_note "executor-postgres pending: $(pending_reason executor-postgres)"
+  echo "-- backend: postgres" && ARBITR_TEST_BACKEND=postgres pytest_run "${READY_DIRS[@]}" -q -m "not sqlite_only"
 }
 
 s_integrations() {

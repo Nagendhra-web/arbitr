@@ -30,7 +30,7 @@ from arbitr.core.spec import ToolSpec
 from arbitr.core.taint import Taint
 from arbitr.policy.dlp import outbound_findings
 from arbitr.policy.engine import GateInput, decide
-from arbitr.policy.schema import EffectName, Outcome, format_errors, load_yaml
+from arbitr.policy.schema import EffectName, Verdict, format_errors, load_yaml
 from arbitr.resources.registry import classify
 
 if TYPE_CHECKING:
@@ -72,7 +72,7 @@ class Case(_Model):
     counters: dict[str, float] = Field(default_factory=dict)
     mode: Literal["enforce", "shadow"] | None = None
     outbound_findings: tuple[str, ...] | None = None
-    expect: Outcome
+    expect: Verdict
     expect_rule: str | None = None
 
     @field_validator("tool")

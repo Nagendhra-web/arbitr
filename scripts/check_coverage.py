@@ -1,6 +1,6 @@
 """Enforce per-package coverage floors from a coverage.py JSON report.
 
-At least 95% on core/ and policy/ (the
+At least 95% on core/, policy/, the executor and the credential providers (the
 overall 90% floor is enforced by pytest-cov). A package with no statements yet
 is reported as such, so an empty package never looks like a covered one.
 """
@@ -11,7 +11,12 @@ import json
 import sys
 from pathlib import Path
 
-FLOORS = {"src/arbitr/core/": 95.0, "src/arbitr/policy/": 95.0}
+FLOORS = {
+    "src/arbitr/core/": 95.0,
+    "src/arbitr/policy/": 95.0,
+    "src/arbitr/executor.py": 95.0,
+    "src/arbitr/credentials.py": 95.0,
+}
 
 
 def main(report_path: str) -> int:

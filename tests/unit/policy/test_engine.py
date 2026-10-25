@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+from arbitr.core.errors import PolicyError
 from arbitr.policy.engine import (
     GateInput,
     ResolvedResource,
@@ -283,7 +284,7 @@ def test_explain_lists_every_matching_rule_and_the_winner() -> None:
     text = d.explain()
     assert "deny by rule no-destroy-critical" in text
     assert "code-freeze" in text
-    assert "deny beats require_approval beats allow" in text
+    assert "deny beats require_approval beats delay beats allow" in text
 
 
 def test_decide_is_pure() -> None:
@@ -363,3 +364,34 @@ def test_operator(condition: ArgCondition, expected: bool) -> None:
 def test_regex_input_is_bounded() -> None:
     big = {"s": "a" * 1_000_000 + "!"}
     assert evaluate(cond("$.s", "regex", "!$"), big) is False  # only the first part is searched
+
+
+def test_resource_count_counts_distinct_resources_of_one_kind() -> None:
+    policy = load_policy("""
+version: 1
+rules:
+  - id: crowd
+    when: { effect: external_comm, resource_count_gt: { kind: email, value: 2 } }
+    then: require_approval
+    reason: Too many recipients.
+""")
+
+    def mail(*uris: str) -> tuple[ResolvedResource, ...]:
+        return tuple(ResolvedResource(id=None, kind="email", uri=u) for u in uris)
+
+    other = ResolvedResource(id=None, kind="url", uri="https://example.com")
+    two = gate("email.send", "external_comm", resources=(*mail("a@x.io", "b@x.io"), other))
+    three = gate("email.send", "external_comm", resources=mail("a@x.io", "b@x.io", "c@x.io"))
+    same = gate("email.send", "external_comm", resources=mail("a@x.io", "a@x.io", "b@x.io"))
+    assert decide(two, policy, {}).outcome == "allow"
+    assert decide(three, policy, {}).outcome == "require_approval"
+    assert decide(same, policy, {}).outcome == "allow"
+
+
+def test_resource_count_needs_a_kind_and_a_non_negative_value() -> None:
+    for bad in ("{ kind: email, value: -1 }", "{ value: 3 }", "{ kind: '', value: 3 }"):
+        with pytest.raises(PolicyError):
+            load_policy(
+                "version: 1\nrules:\n  - id: r\n    when: { resource_count_gt: " + bad + " }\n"
+                "    then: deny\n    reason: x\n"
+            )

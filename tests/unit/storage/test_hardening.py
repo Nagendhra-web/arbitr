@@ -203,8 +203,9 @@ def test_transaction_is_dead_after_its_block(db: SQLiteStorage) -> None:
 
 
 def test_failed_migration_raises_storage_error(db: SQLiteStorage) -> None:
-    bad = Migration(3, "broken", "CREATE TABLE ok_table (x INTEGER); THIS IS NOT SQL")
-    with pytest.raises(StorageError, match="migration 3"):
+    n = len(SQLITE) + 1
+    bad = Migration(n, "broken", "CREATE TABLE ok_table (x INTEGER); THIS IS NOT SQL")
+    with pytest.raises(StorageError, match=f"migration {n}"):
         db.migrate((*SQLITE, bad))
     assert db.schema_version() == len(SQLITE)
 

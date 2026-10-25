@@ -24,12 +24,13 @@ Example:
     >>> path = pathlib.Path(tempfile.mkdtemp()) / "ledger.db"
     >>> with SQLiteStorage.open(path, Redactor(b"k" * 32)) as db:
     ...     db.schema_version()
-    2
+    4
 """
 
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import math
 import random
@@ -37,11 +38,12 @@ import sqlite3
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Final, Self
 
 from arbitr.core.audit import Event, VerifyResult, event_hash, genesis_hash, verify_chain
 from arbitr.core.canonical import canonical_json
-from arbitr.core.errors import ScopeError, StaleStateError, StorageError
+from arbitr.core.errors import CanonicalizationError, ScopeError, StaleStateError, StorageError
 from arbitr.core.intent import new_ulid
 from arbitr.core.scope import Scope
 from arbitr.core.states import IntentState, can_transition, check_transition
@@ -49,7 +51,7 @@ from arbitr.core.taint import Taint, merge
 from arbitr.storage.migrations import SQLITE, Migration
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Mapping, Sequence
+    from collections.abc import Callable, Iterator, Mapping, Sequence
     from pathlib import Path
     from types import TracebackType
 
@@ -67,6 +69,7 @@ _UPDATABLE_ORDER: Final = (
     "attempt",
     "lease_owner",
     "lease_expires_at",
+    "scheduled_for",
 )
 _UPDATABLE: Final = frozenset(_UPDATABLE_ORDER)
 _RESERVED_DETAIL: Final = frozenset({"from", "to", "intent_id", "run_id"}) | _UPDATABLE
@@ -80,7 +83,8 @@ _TRANSITION_SQL: Final = (
     " shadow_decision = CASE WHEN ? THEN ? ELSE shadow_decision END,"
     " attempt = CASE WHEN ? THEN ? ELSE attempt END,"
     " lease_owner = CASE WHEN ? THEN ? ELSE lease_owner END,"
-    " lease_expires_at = CASE WHEN ? THEN ? ELSE lease_expires_at END"
+    " lease_expires_at = CASE WHEN ? THEN ? ELSE lease_expires_at END,"
+    " scheduled_for = CASE WHEN ? THEN ? ELSE scheduled_for END"
     " WHERE intent_id = ? AND state = ?"
     " AND (? IS NULL OR attempt = ?) AND (? IS NULL OR lease_owner = ?)"
 )
@@ -91,6 +95,9 @@ _RESERVED_KINDS: Final = _TRANSITION_KINDS | {
     "budget_reserved",
     "budget_released",
     "taint_added",
+    "lease_extended",
+    "receipt_recorded",
+    "approval_requested",
 }
 # What a new intent's updatable columns hold before any transition sets them.
 _COLUMN_DEFAULTS: Final[dict[str, object]] = {
@@ -101,6 +108,8 @@ _COLUMN_DEFAULTS: Final[dict[str, object]] = {
     "attempt": 0,
     "lease_owner": None,
     "lease_expires_at": None,
+    "scheduled_for": None,
+    "args_exact": False,
 }
 # Every intent column verify compares with the facts recorded in the events.
 _CHECKED_COLUMNS: Final = (
@@ -111,8 +120,29 @@ _CHECKED_COLUMNS: Final = (
     "effect",
     "step_id",
     "run_id",
+    "args_exact",
     *_UPDATABLE_ORDER,
 )
+_RESULT_LIMIT: Final = 65_536
+"""Stored (redacted) results longer than this are dropped; the hash is kept."""
+
+
+def parse_db_time(text: str) -> datetime:
+    """Parse a database timestamp such as ``2026-10-25T12:00:00.250Z`` (UTC).
+
+    Raises:
+        StorageError: the text is not a database timestamp.
+    """
+    try:
+        return datetime.strptime(text, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC)
+    except ValueError as exc:
+        raise StorageError(f"not a database timestamp: {text!r}") from exc
+
+
+def format_db_time(moment: datetime) -> str:
+    """Format a time the way the database clock does, in UTC with milliseconds."""
+    utc = moment.astimezone(UTC)
+    return f"{utc:%Y-%m-%dT%H:%M:%S}.{utc.microsecond // 1000:03d}Z"
 
 
 @dataclass(frozen=True)
@@ -168,6 +198,36 @@ class IntentRow:
     lease_expires_at: str | None
     created_at: str
     updated_at: str
+    args_exact: bool = False
+    """True when ``args_redacted`` holds the real arguments (redaction changed nothing)."""
+    scheduled_for: str | None = None
+
+
+@dataclass(frozen=True)
+class ReceiptRow:
+    """Proof that an intent's side effect happened, as stored."""
+
+    intent_id: str
+    result_hash: str
+    result_redacted: str | None
+    external_id: str | None
+    source: str
+    created_at: str
+
+
+@dataclass(frozen=True)
+class ApprovalRow:
+    """A request for a human decision, bound to one intent hash."""
+
+    approval_id: str
+    intent_id: str
+    intent_hash: str
+    status: str
+    requested_at: str
+    expires_at: str
+    decided_by: str | None
+    decided_at: str | None
+    note: str | None
 
 
 class Transaction:
@@ -176,13 +236,21 @@ class Transaction:
     It stops working the moment its ``with`` block ends.
     """
 
-    def __init__(self, conn: sqlite3.Connection, redactor: Redactor, genesis: str) -> None:
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        redactor: Redactor,
+        genesis: str,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
         """Wrap an open transaction. Use ``SQLiteStorage.transaction()`` instead."""
         self._conn = conn
         self._redactor = redactor
         self._genesis = genesis
         self._closed = False
-        self.now: str = conn.execute(_NOW_SQL).fetchone()[0]
+        self.now: str = (
+            conn.execute(_NOW_SQL).fetchone()[0] if clock is None else format_db_time(clock())
+        )
         """The database clock at the start of this transaction (UTC, ISO 8601)."""
 
     def _live(self) -> sqlite3.Connection:
@@ -219,9 +287,19 @@ class Transaction:
         *,
         intent_id: str | None = None,
         run_id: str | None = None,
+        verbatim: bool = False,
     ) -> Event:
+        """Chain one event. ``verbatim`` keeps the payload exactly as given.
+
+        Storage's own events mirror fields that its tables already hold, either
+        as given (ids, hashes, keys, worker names) or redacted once already
+        (arguments, task text). Redacting them again could rewrite a hash or a
+        marker that happens to contain a card-like digit run, and verify would
+        then report a healthy ledger as tampered. Free text from callers is
+        always redacted.
+        """
         conn = self._live()
-        body = canonical_json(self._redactor.redact(dict(payload)))
+        body = canonical_json(dict(payload) if verbatim else self._redactor.redact(dict(payload)))
         row = conn.execute("SELECT hash FROM events ORDER BY seq DESC LIMIT 1").fetchone()
         prev = row[0] if row else self._genesis
         digest = event_hash(prev, kind, body, self.now, intent_id=intent_id, run_id=run_id)
@@ -249,12 +327,16 @@ class Transaction:
                 out[key] = float(row[0])
         return out
 
-    def reserve_budget(self, key: str, amount: float, limit: float) -> bool:
+    def reserve_budget(
+        self, key: str, amount: float, limit: float, *, intent_id: str | None = None
+    ) -> bool:
         """Add ``amount`` to a counter only if it stays within ``limit``.
 
         Atomic: the check and the add are one statement inside this write
         transaction, so concurrent reservations can never overspend. Returns
         False, changing nothing, when the reservation would exceed the limit.
+        With ``intent_id``, the reservation is also recorded against that
+        intent, so ``release_reservations`` can give back exactly what it took.
         """
         conn = self._live()
         _check_amount(amount)
@@ -270,10 +352,22 @@ class Transaction:
         )
         if cur.rowcount != 1:
             return False
-        self._append("budget_reserved", {"scope_key": key, "amount": amount, "limit": limit})
+        if intent_id is not None:
+            conn.execute(
+                "INSERT INTO reservations (intent_id, scope_key, amount) VALUES (?, ?, ?)"
+                " ON CONFLICT (intent_id, scope_key)"
+                " DO UPDATE SET amount = amount + excluded.amount",
+                (intent_id, key, amount),
+            )
+        self._append(
+            "budget_reserved",
+            {"scope_key": key, "amount": amount, "limit": limit},
+            intent_id=intent_id,
+            verbatim=True,
+        )
         return True
 
-    def release_budget(self, key: str, amount: float) -> None:
+    def release_budget(self, key: str, amount: float, *, intent_id: str | None = None) -> None:
         """Return ``amount`` to a counter, for an action that did not run.
 
         Raises:
@@ -288,10 +382,18 @@ class Transaction:
         )
         if cur.rowcount != 1:
             raise StorageError(f"cannot release more than is reserved on budget {key}")
-        self._append("budget_released", {"scope_key": key, "amount": amount})
+        self._append(
+            "budget_released",
+            {"scope_key": key, "amount": amount},
+            intent_id=intent_id,
+            verbatim=True,
+        )
 
-    def reserve_all(self, charges: Sequence[BudgetCharge]) -> bool:
-        """Reserve every charge, or none of them. Returns whether they were reserved."""
+    def reserve_all(self, charges: Sequence[BudgetCharge], *, intent_id: str | None = None) -> bool:
+        """Reserve every charge, or none of them. Returns whether they were reserved.
+
+        With ``intent_id``, the reservations are recorded against that intent.
+        """
         self._live()
         totals: dict[str, float] = {}
         limits: dict[str, float] = {}
@@ -303,11 +405,32 @@ class Transaction:
         if any(current[k] + totals[k] > limits[k] for k in totals):
             return False
         for charge in charges:
-            if not self.reserve_budget(charge.scope_key, charge.amount, charge.limit):
+            if not self.reserve_budget(
+                charge.scope_key, charge.amount, charge.limit, intent_id=intent_id
+            ):
                 raise StorageError(  # pragma: no cover, checked above inside this transaction
                     f"budget {charge.scope_key} changed inside its own transaction"
                 )
         return True
+
+    def reservations(self, intent_id: str) -> dict[str, float]:
+        """What an intent holds reserved, by budget counter."""
+        rows = self._live().execute(
+            "SELECT scope_key, amount FROM reservations WHERE intent_id = ? ORDER BY scope_key",
+            (intent_id,),
+        )
+        return {str(key): float(amount) for key, amount in rows}
+
+    def release_reservations(self, intent_id: str) -> int:
+        """Give back everything an intent reserved. Returns how many counters changed.
+
+        Safe to call twice: the second call finds nothing left to release.
+        """
+        held = self.reservations(intent_id)
+        for key, amount in held.items():
+            self.release_budget(key, amount, intent_id=intent_id)
+        self._live().execute("DELETE FROM reservations WHERE intent_id = ?", (intent_id,))
+        return len(held)
 
     # ------------------------------------------------------------ runs
 
@@ -388,6 +511,7 @@ class Transaction:
                 "taint": taint.to_dict(),
             },
             run_id=run_id,
+            verbatim=True,  # the task text in the scope was redacted above
         )
 
     def get_run(self, run_id: str) -> RunRow | None:
@@ -451,6 +575,7 @@ class Transaction:
         paths = (*intent.redact_paths, *redact_paths)
         args = self._redactor.redact(intent.args, paths)
         args_json = canonical_json(args)
+        args_exact = args_json == canonical_json(intent.args)
         resources = canonical_json(
             [
                 {
@@ -464,8 +589,8 @@ class Transaction:
         try:
             conn.execute(
                 "INSERT INTO intents (intent_id, run_id, step_id, tool, args_redacted,"
-                " intent_hash, idempotency_key, effect, resources, state, created_at, updated_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " intent_hash, idempotency_key, effect, resources, state, created_at, updated_at,"
+                " args_exact) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     intent.intent_id,
                     intent.run_id,
@@ -479,6 +604,7 @@ class Transaction:
                     IntentState.PROPOSED.value,
                     self.now,
                     self.now,
+                    int(args_exact),
                 ),
             )
         except sqlite3.IntegrityError as exc:
@@ -496,9 +622,11 @@ class Transaction:
                 "intent_hash": intent.intent_hash,
                 "idempotency_key": intent.idempotency_key,
                 "step_id": intent.step_id,
+                "args_exact": args_exact,
             },
             intent_id=intent.intent_id,
             run_id=intent.run_id,
+            verbatim=True,  # the arguments were redacted above
         )
         row = self.get_intent(intent.intent_id)
         if row is None:  # pragma: no cover, just inserted in this transaction
@@ -563,13 +691,259 @@ class Transaction:
         row = self.get_intent(intent_id)
         if row is None:  # pragma: no cover, the update above matched it
             raise StorageError("intent vanished inside its own transaction")
+        payload: dict[str, object] = {"from": expected.value, "to": target.value, **updates}
+        safe_detail = self._redactor.redact(extra)  # only the free-text detail is redacted
+        if isinstance(safe_detail, dict):
+            payload.update(safe_detail)
         self._append(
-            target.value.lower(),
-            {"from": expected.value, "to": target.value, **updates, **extra},
-            intent_id=intent_id,
-            run_id=row.run_id,
+            target.value.lower(), payload, intent_id=intent_id, run_id=row.run_id, verbatim=True
         )
         return row
+
+    # ------------------------------------------------------------ execution
+
+    def _later(self, seconds: float) -> str:
+        return format_db_time(parse_db_time(self.now) + timedelta(seconds=seconds))
+
+    def start_execution(
+        self,
+        intent_id: str,
+        *,
+        expected: IntentState,
+        worker: str,
+        ttl_seconds: float,
+        expected_attempt: int | None = None,
+    ) -> IntentRow:
+        """Move an intent to EXECUTING with the next attempt and a lease on the database clock.
+
+        ``expected_attempt`` fences a decision made outside this transaction
+        (for example a probe's answer): if another attempt started since, the
+        decision is stale and nothing changes.
+
+        Raises:
+            StaleStateError: another worker moved the intent first.
+        """
+        row = self.get_intent(intent_id)
+        if row is None:
+            raise StaleStateError(f"intent {intent_id} does not exist")
+        if expected_attempt is not None and row.attempt != expected_attempt:
+            raise StaleStateError(
+                f"intent {intent_id} is at attempt {row.attempt}, not {expected_attempt}"
+            )
+        return self.transition(
+            intent_id,
+            IntentState.EXECUTING,
+            expected=expected,
+            fields={
+                "attempt": row.attempt + 1,
+                "lease_owner": worker,
+                "lease_expires_at": self._later(ttl_seconds),
+            },
+            expected_attempt=row.attempt,
+        )
+
+    def heartbeat(
+        self, intent_id: str, *, worker: str, attempt: int, ttl_seconds: float
+    ) -> IntentRow:
+        """Extend a running intent's lease. Only the lease owner of that attempt can.
+
+        Raises:
+            StaleStateError: the lease was lost (expired and taken, or the intent finished).
+        """
+        expires = self._later(ttl_seconds)
+        cur = self._live().execute(
+            "UPDATE intents SET lease_expires_at = ?, updated_at = ? WHERE intent_id = ?"
+            " AND state = 'EXECUTING' AND lease_owner = ? AND attempt = ?",
+            (expires, self.now, intent_id, worker, attempt),
+        )
+        if cur.rowcount != 1:
+            raise StaleStateError(f"worker {worker} no longer holds the lease on {intent_id}")
+        row = self.get_intent(intent_id)
+        if row is None:  # pragma: no cover, the update above matched it
+            raise StorageError("intent vanished inside its own transaction")
+        self._append(
+            "lease_extended",
+            {"lease_expires_at": expires, "lease_owner": worker, "attempt": attempt},
+            intent_id=intent_id,
+            run_id=row.run_id,
+            verbatim=True,
+        )
+        return row
+
+    def stale_executions(self) -> list[IntentRow]:
+        """Intents in EXECUTING whose lease has run out, oldest id first."""
+        cur = self._live().execute(
+            "SELECT * FROM intents WHERE state = 'EXECUTING' AND lease_expires_at <= ?"
+            " ORDER BY intent_id",
+            (self.now,),
+        )
+        names = [d[0] for d in cur.description]
+        return [_intent_row(dict(zip(names, r, strict=True))) for r in cur.fetchall()]
+
+    def has_been(self, intent_id: str, state: IntentState) -> bool:
+        """Whether the intent was ever moved to ``state`` (from its recorded events)."""
+        row = (
+            self._live()
+            .execute(
+                "SELECT 1 FROM events WHERE intent_id = ? AND kind = ? LIMIT 1",
+                (intent_id, state.value.lower()),
+            )
+            .fetchone()
+        )
+        return row is not None
+
+    def intents_in(self, state: IntentState) -> list[IntentRow]:
+        """Every intent in one state, oldest id first."""
+        cur = self._live().execute(
+            "SELECT * FROM intents WHERE state = ? ORDER BY intent_id", (state.value,)
+        )
+        names = [d[0] for d in cur.description]
+        return [_intent_row(dict(zip(names, r, strict=True))) for r in cur.fetchall()]
+
+    def schedule(self, intent_id: str, *, delay_seconds: float) -> IntentRow:
+        """Move an approved intent to SCHEDULED, due after the delay (a cancel window)."""
+        return self.transition(
+            intent_id,
+            IntentState.SCHEDULED,
+            expected=IntentState.APPROVED,
+            fields={"scheduled_for": self._later(delay_seconds)},
+        )
+
+    def due_scheduled(self) -> list[IntentRow]:
+        """Scheduled intents whose window has passed, oldest id first."""
+        cur = self._live().execute(
+            "SELECT * FROM intents WHERE state = 'SCHEDULED' AND scheduled_for <= ?"
+            " ORDER BY intent_id",
+            (self.now,),
+        )
+        names = [d[0] for d in cur.description]
+        return [_intent_row(dict(zip(names, r, strict=True))) for r in cur.fetchall()]
+
+    def insert_receipt(
+        self, intent_id: str, *, result: object, external_id: str | None, source: str
+    ) -> ReceiptRow:
+        """Record proof of a side effect, with its ``receipt_recorded`` event.
+
+        The result is redacted before it is hashed or stored, and stored only up
+        to _RESULT_LIMIT characters. A result with no canonical JSON form is
+        hashed by its type.
+
+        Raises:
+            StaleStateError: the intent already has a receipt.
+        """
+        try:
+            text: str | None = canonical_json(self._redactor.redact(result))
+            digest = hashlib.sha256(text.encode()).hexdigest()  # type: ignore[union-attr]
+        except (CanonicalizationError, TypeError, ValueError):
+            text = None
+            digest = hashlib.sha256(f"unencodable:{type(result).__name__}".encode()).hexdigest()
+        if text is not None and len(text) > _RESULT_LIMIT:
+            text = None
+        external = self._redactor.redact_text(external_id) if external_id is not None else None
+        try:
+            self._live().execute(
+                "INSERT INTO receipts (intent_id, result_hash, result_redacted, external_id,"
+                " source, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (intent_id, digest, text, external, source, self.now),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise StaleStateError(f"intent {intent_id} already has a receipt") from exc
+        row = self.get_intent(intent_id)
+        self._append(
+            "receipt_recorded",
+            {"result_hash": digest, "external_id": external, "source": source},
+            intent_id=intent_id,
+            run_id=row.run_id if row is not None else None,
+            verbatim=True,
+        )
+        return ReceiptRow(intent_id, digest, text, external, source, self.now)
+
+    def get_receipt(self, intent_id: str) -> ReceiptRow | None:
+        """The receipt of an intent, or None."""
+        found = (
+            self._live()
+            .execute(
+                "SELECT intent_id, result_hash, result_redacted, external_id, source, created_at"
+                " FROM receipts WHERE intent_id = ?",
+                (intent_id,),
+            )
+            .fetchone()
+        )
+        return ReceiptRow(*found) if found is not None else None
+
+    def create_approval(self, intent_id: str, *, ttl_seconds: float) -> ApprovalRow:
+        """Ask for a human decision on one intent, bound to its intent hash."""
+        row = self.get_intent(intent_id)
+        if row is None:
+            raise StaleStateError(f"intent {intent_id} does not exist")
+        approval_id = new_ulid()
+        expires = self._later(ttl_seconds)
+        self._live().execute(
+            "INSERT INTO approvals (approval_id, intent_id, intent_hash, status, requested_at,"
+            " expires_at) VALUES (?, ?, ?, 'pending', ?, ?)",
+            (approval_id, intent_id, row.intent_hash, self.now, expires),
+        )
+        self._append(
+            "approval_requested",
+            {"approval_id": approval_id, "intent_hash": row.intent_hash, "expires_at": expires},
+            intent_id=intent_id,
+            run_id=row.run_id,
+            verbatim=True,
+        )
+        return ApprovalRow(approval_id, intent_id, row.intent_hash, "pending", self.now, expires,
+                           None, None, None)  # fmt: skip
+
+    def get_approval(self, approval_id: str) -> ApprovalRow | None:
+        """One approval, or None."""
+        found = (
+            self._live()
+            .execute("SELECT * FROM approvals WHERE approval_id = ?", (approval_id,))
+            .fetchone()
+        )
+        return ApprovalRow(*found) if found is not None else None
+
+    def approval_for_intent(self, intent_id: str) -> ApprovalRow | None:
+        """The latest approval requested for an intent, or None."""
+        found = (
+            self._live()
+            .execute(
+                "SELECT * FROM approvals WHERE intent_id = ? ORDER BY requested_at DESC,"
+                " approval_id DESC LIMIT 1",
+                (intent_id,),
+            )
+            .fetchone()
+        )
+        return ApprovalRow(*found) if found is not None else None
+
+
+def _apply_change(
+    expected: dict[str, dict[str, object]], event: Event, payload: dict[str, object]
+) -> str | None:
+    """Apply a transition or lease extension to the facts replayed so far."""
+    is_move = event.kind in _TRANSITION_KINDS and "to" in payload
+    if not is_move and event.kind != "lease_extended":
+        return None
+    facts = expected.get(str(event.intent_id))
+    if facts is None:
+        return f"event {event.seq} changes {event.intent_id} before it exists"
+    if not is_move:
+        facts["lease_expires_at"] = payload.get("lease_expires_at")
+        return None
+    if payload.get("from") != facts["state"] or not can_transition(
+        IntentState(str(payload["from"])), IntentState(str(payload["to"]))
+    ):
+        return f"event {event.seq} records an impossible move"
+    facts["state"] = payload["to"]
+    for name in _UPDATABLE_ORDER:
+        if name in payload:
+            facts[name] = payload[name]
+    return None
+
+
+def _intent_row(data: dict[str, object]) -> IntentRow:
+    data["state"] = IntentState(str(data["state"]))
+    data["args_exact"] = bool(data["args_exact"])
+    return IntentRow(**data)  # type: ignore[arg-type]
 
 
 def _fetch_intent(conn: sqlite3.Connection, column: str, value: str) -> IntentRow | None:
@@ -582,8 +956,7 @@ def _fetch_intent(conn: sqlite3.Connection, column: str, value: str) -> IntentRo
     if row is None:
         return None
     data = dict(zip([d[0] for d in cur.description], row, strict=True))
-    data["state"] = IntentState(data["state"])
-    return IntentRow(**data)
+    return _intent_row(data)
 
 
 def _check_amount(value: float) -> None:
@@ -621,19 +994,38 @@ def _enable_wal(conn: sqlite3.Connection, busy_timeout_ms: int) -> None:
 class SQLiteStorage:
     """A ledger stored in one SQLite file."""
 
-    def __init__(self, conn: sqlite3.Connection, redactor: Redactor) -> None:
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        redactor: Redactor,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
         """Wrap a connection. Use ``SQLiteStorage.open()`` instead."""
         self._conn = conn
         self._redactor = redactor
+        self._clock = clock
         self._genesis = ""
 
     @classmethod
     def open(
-        cls, path: str | Path, redactor: Redactor, *, busy_timeout_ms: int = BUSY_TIMEOUT_MS
+        cls,
+        path: str | Path,
+        redactor: Redactor,
+        *,
+        busy_timeout_ms: int = BUSY_TIMEOUT_MS,
+        any_thread: bool = False,
+        clock: Callable[[], datetime] | None = None,
     ) -> SQLiteStorage:
         """Open (or create) a ledger file, apply pending migrations and return it.
 
         Safe to call from many threads and processes at once on a new file.
+        One storage object must still be used by one thread at a time;
+        ``any_thread=True`` only allows that thread to differ from the opener
+        (for example, closing a worker thread's connection from the main thread).
+
+        ``clock`` replaces the database clock (``Transaction.now``) with a
+        function returning an aware datetime. It exists for deterministic
+        simulation tests; leave it unset everywhere else.
 
         Raises:
             StorageError: the file cannot be opened or migrated, or its schema is
@@ -641,12 +1033,17 @@ class SQLiteStorage:
         """
         conn: sqlite3.Connection | None = None
         try:
-            conn = sqlite3.connect(str(path), isolation_level=None, timeout=busy_timeout_ms / 1000)
+            conn = sqlite3.connect(
+                str(path),
+                isolation_level=None,
+                timeout=busy_timeout_ms / 1000,
+                check_same_thread=not any_thread,
+            )
             conn.execute(f"PRAGMA busy_timeout = {int(busy_timeout_ms)}")
             _enable_wal(conn, busy_timeout_ms)
             conn.execute("PRAGMA synchronous = FULL")
             conn.execute("PRAGMA foreign_keys = ON")
-            storage = cls(conn, redactor)
+            storage = cls(conn, redactor, clock)
             storage.migrate()
             storage._genesis = genesis_hash(storage.install_id())
         except sqlite3.Error as exc:
@@ -788,7 +1185,7 @@ class SQLiteStorage:
                 commit fails. The ledger is unchanged in every case (fail closed).
         """
         with self._raw_transaction() as conn:
-            tx = Transaction(conn, self._redactor, self._genesis)
+            tx = Transaction(conn, self._redactor, self._genesis, self._clock)
             try:
                 yield tx
             finally:
@@ -816,10 +1213,57 @@ class SQLiteStorage:
         chain = verify_chain(self.events(), self._genesis)
         if not chain.ok:
             return chain
-        problem = self._check_intents() or self._check_budgets() or self._check_runs()
+        problem = (
+            self._check_intents()
+            or self._check_budgets()
+            or self._check_reservations()
+            or self._check_runs()
+            or self._check_receipts()
+            or self._check_approvals()
+        )
         if problem:
             return VerifyResult(ok=False, checked=chain.checked, reason=problem)
         return chain
+
+    def _check_receipts(self) -> str | None:
+        """Every receipt must match its receipt_recorded event, and the other way round."""
+        recorded: dict[str, tuple[object, ...]] = {}
+        for event in self.events():
+            if event.kind == "receipt_recorded" and event.intent_id is not None:
+                payload = json.loads(event.payload)
+                recorded[event.intent_id] = (
+                    payload.get("result_hash"),
+                    payload.get("external_id"),
+                    payload.get("source"),
+                )
+        cur = self._conn.execute("SELECT intent_id, result_hash, external_id, source FROM receipts")
+        for intent_id, *values in cur:
+            if recorded.pop(intent_id, None) != tuple(values):
+                return f"receipt for intent {intent_id} does not match its recorded event"
+        if recorded:
+            return f"intent {sorted(recorded)[0]} has a receipt event but no receipt"
+        return None
+
+    def _check_approvals(self) -> str | None:
+        """Every approval request must match its approval_requested event."""
+        recorded: dict[str, tuple[object, ...]] = {}
+        for event in self.events():
+            if event.kind == "approval_requested":
+                payload = json.loads(event.payload)
+                recorded[str(payload.get("approval_id"))] = (
+                    event.intent_id,
+                    payload.get("intent_hash"),
+                    payload.get("expires_at"),
+                )
+        cur = self._conn.execute(
+            "SELECT approval_id, intent_id, intent_hash, expires_at FROM approvals"
+        )
+        for approval_id, *values in cur:
+            if recorded.pop(approval_id, None) != tuple(values):
+                return f"approval {approval_id} does not match its recorded event"
+        if recorded:
+            return f"approval {sorted(recorded)[0]} has an event but no record"
+        return None
 
     def _check_runs(self) -> str | None:
         """Every run row must match its run_started event and its latest taint."""
@@ -873,6 +1317,25 @@ class SQLiteStorage:
                 return f"budget counter {key} is missing but has recorded reservations"
         return None
 
+    def _check_reservations(self) -> str | None:
+        """Every reservation row must equal its intent's reserved minus released events."""
+        expected: dict[tuple[str, str], float] = {}
+        for event in self.events():
+            if event.intent_id is None or event.kind not in {"budget_reserved", "budget_released"}:
+                continue
+            payload = json.loads(event.payload)
+            sign = 1.0 if event.kind == "budget_reserved" else -1.0
+            slot = (event.intent_id, str(payload["scope_key"]))
+            expected[slot] = expected.get(slot, 0.0) + sign * float(payload["amount"])
+        rows = self._conn.execute("SELECT intent_id, scope_key, amount FROM reservations")
+        for intent_id, key, amount in rows:
+            if not math.isclose(float(amount), expected.pop((intent_id, key), 0.0), abs_tol=1e-9):
+                return f"reservation of {key} by intent {intent_id} does not match its events"
+        for (intent_id, key), value in expected.items():
+            if not math.isclose(value, 0.0, abs_tol=1e-9):
+                return f"reservation of {key} by intent {intent_id} is missing"
+        return None
+
     def _check_intents(self) -> str | None:
         expected, problem = self._replay_intent_events()
         if problem:
@@ -897,19 +1360,12 @@ class SQLiteStorage:
                     "run_id": event.run_id,
                     "state": IntentState.PROPOSED.value,
                     **_COLUMN_DEFAULTS,
+                    "args_exact": bool(payload.get("args_exact", False)),
                 }
-            elif event.kind in _TRANSITION_KINDS and "to" in payload:
-                facts = expected.get(event.intent_id)
-                if facts is None:
-                    return expected, f"event {event.seq} moves {event.intent_id} before it exists"
-                if payload.get("from") != facts["state"] or not can_transition(
-                    IntentState(payload["from"]), IntentState(payload["to"])
-                ):
-                    return expected, f"event {event.seq} records an impossible move"
-                facts["state"] = payload["to"]
-                for name in _UPDATABLE_ORDER:
-                    if name in payload:
-                        facts[name] = payload[name]
+            else:
+                problem = _apply_change(expected, event, payload)
+                if problem:
+                    return expected, problem
         return expected, None
 
     def _compare_intents(self, expected: dict[str, dict[str, object]]) -> str | None:
@@ -932,9 +1388,7 @@ class SQLiteStorage:
         cur = self._conn.execute("SELECT * FROM intents")
         names = [d[0] for d in cur.description]
         for row in cur:
-            data = dict(zip(names, row, strict=True))
-            data["state"] = IntentState(data["state"])
-            yield IntentRow(**data)
+            yield _intent_row(dict(zip(names, row, strict=True)))
 
     def intent_count(self) -> int:
         """Number of stored intents."""

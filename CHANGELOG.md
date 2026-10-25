@@ -67,6 +67,40 @@ All notable changes to this project are recorded here. The format follows
     git, cloud-cli, kubernetes, payments, email-and-messaging, github,
     mcp-basics and lethal-trifecta. A policy includes packs by name and can
     replace or exclude any pack rule.
+- Executor:
+  - `Ledger.execute` and `aexecute` run every tool call through the ledger and
+    the gate. The decision (with its budget reservations) and the EXECUTING
+    record with a lease are committed before the tool runs; if the ledger
+    cannot be written, the tool does not run.
+  - Leases on the database clock with a heartbeat, renewed right before a late
+    call. Fences on attempt and lease owner refuse late writes from a worker
+    that lost its lease.
+  - Recovery by idempotency mode: `native` tools re-run with the same
+    idempotency key, `probe` tools ask the service whether the action
+    happened, and `none` tools stay UNKNOWN until the policy's `on_unknown`
+    rule or a human decides. A repeated call returns the stored receipt.
+    `recover_stale()` resolves expired work after a restart.
+  - Cancel windows: a rule can say `then: delay 60s`. The action is scheduled
+    with its budget reserved, `cancel()` stops it and gives the budget back,
+    and `run_due()` runs due actions through the normal path, including ones a
+    crashed scheduler left behind.
+  - Budget reservations are recorded per action, so a failure or a cancel
+    gives back exactly what that action reserved. A run's spend limit is
+    charged to the run and every run above it.
+  - Credentials are injected only after the gate allows the action. They are
+    never stored. Their values, and their common encodings, are scrubbed from
+    tool results, errors, error causes and traceback frames before the ledger
+    or the agent sees them; an object that carries one (in an attribute, a
+    slot or a closure) is replaced by its scrubbed text. An agent that calls a
+    tool from its own except block keeps its own error untouched.
+  - Proven by a fault-injection matrix that kills a real worker process at
+    every step for every idempotency mode, races of 50 threads and 8 processes
+    on one key, a TLA+ model of the protocol checked with TLC, and 2,000
+    deterministic simulation seeds that drive the real executor with crashes
+    at every step.
+  - A rule condition, `resource_count_gt`, that counts distinct resources of
+    one kind; the messaging pack uses it to count recipients across to, cc and
+    bcc.
 - Repository scaffold, packaging with optional extras, local CI pipeline
   (`make ci`, `make ci-fast`, `make ci-docker`, `make act`), pinned CI Docker
   image, Postgres compose file for tests, git hooks that enforce owner
@@ -75,6 +109,9 @@ All notable changes to this project are recorded here. The format follows
 
 ### Fixed
 
+- `gh api` paths are decoded and normalized before policy matching, so
+  doubled, trailing or encoded slashes and dot segments no longer slip past
+  path rules.
 - CI records no longer overwrite each other (one file per run
   kind), PENDING can only come from the pending list, skips fail CI, the
   push guard requires a clean tree and HEAD as the pushed commit, identity

@@ -9,9 +9,9 @@ Workers are generators. Each ``yield`` is a step boundary where the scheduler
 may switch workers or inject a crash. A worker yields ``Sleep(seconds)`` to
 advance its own virtual time, or ``Step(label)`` to mark a boundary.
 
-For now it ships with a toy workload. Later the real ledger and executor plug
-in through a fake storage layer that can delay, fail or crash between any two
-operations, and the protocol invariants are checked on the recorded history.
+Two workloads use it: a toy counter (workloads.py) and the real executor on a
+real SQLite ledger (ledger_workload.py), whose blocking code runs in threads
+that pause at every protocol step (fiber.py).
 """
 
 from __future__ import annotations

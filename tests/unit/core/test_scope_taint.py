@@ -298,8 +298,9 @@ def db(tmp_path: Path) -> Iterator[SQLiteStorage]:
         yield storage
 
 
-def test_schema_is_migrated_to_version_2(db: SQLiteStorage) -> None:
-    assert db.schema_version() == 2
+def test_the_scope_column_exists(db: SQLiteStorage) -> None:
+    columns = {r[1] for r in db._conn.execute("PRAGMA table_info(runs)")}
+    assert "scope" in columns
 
 
 def test_run_scope_and_task_are_stored_redacted(db: SQLiteStorage) -> None:

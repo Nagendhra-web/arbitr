@@ -86,19 +86,21 @@ def test_reopening_keeps_install_id_and_applies_nothing(tmp_path: Path) -> None:
 
 
 def test_new_migrations_apply_in_order(db: SQLiteStorage) -> None:
+    n = len(SQLITE)
     extra = (
-        Migration(4, "four", "CREATE TABLE t4 (x INTEGER)"),
-        Migration(3, "three", "CREATE TABLE t3 (x INTEGER); CREATE TABLE t3b (y INTEGER)"),
+        Migration(n + 2, "second", "CREATE TABLE t4 (x INTEGER)"),
+        Migration(n + 1, "first", "CREATE TABLE t3 (x INTEGER); CREATE TABLE t3b (y INTEGER)"),
     )
 
-    assert db.migrate((*SQLITE, *extra)) == [3, 4]
-    assert db.schema_version() == 4
+    assert db.migrate((*SQLITE, *extra)) == [n + 1, n + 2]
+    assert db.schema_version() == n + 2
 
 
 def test_failed_migration_rolls_back(db: SQLiteStorage) -> None:
 
-    bad = Migration(3, "broken", "CREATE TABLE ok_table (x INTEGER); THIS IS NOT SQL")
-    with pytest.raises(StorageError, match="migration 3"):
+    n = len(SQLITE) + 1
+    bad = Migration(n, "broken", "CREATE TABLE ok_table (x INTEGER); THIS IS NOT SQL")
+    with pytest.raises(StorageError, match=f"migration {n}"):
         db.migrate((*SQLITE, bad))
     assert db.schema_version() == len(SQLITE)
     names = {r[0] for r in db._conn.execute("SELECT name FROM sqlite_master")}

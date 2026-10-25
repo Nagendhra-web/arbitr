@@ -34,6 +34,8 @@ class IntentState(StrEnum):
     FAILED = "FAILED"
     UNKNOWN = "UNKNOWN"
     COMPENSATED = "COMPENSATED"
+    SCHEDULED = "SCHEDULED"
+    CANCELLED = "CANCELLED"
 
 
 S = IntentState
@@ -55,12 +57,15 @@ TRANSITIONS: Final[frozenset[tuple[IntentState, IntentState]]] = frozenset(
         (S.UNKNOWN, S.EXECUTING),  # an operator or policy chose to retry
         (S.UNKNOWN, S.FAILED),
         (S.SUCCEEDED, S.COMPENSATED),
+        (S.APPROVED, S.SCHEDULED),  # allowed with a delay: a cancel window
+        (S.SCHEDULED, S.EXECUTING),  # the window passed
+        (S.SCHEDULED, S.CANCELLED),  # a human or a breaker cancelled it in time
     }
 )
 """Every legal (from, to) pair. Anything else is a bug."""
 
 TERMINAL: Final[frozenset[IntentState]] = frozenset(
-    {S.DENIED, S.REJECTED, S.EXPIRED, S.COMPENSATED}
+    {S.DENIED, S.REJECTED, S.EXPIRED, S.COMPENSATED, S.CANCELLED}
 )
 """States nothing ever leaves."""
 

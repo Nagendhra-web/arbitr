@@ -113,6 +113,7 @@ convention = "google"
 "scripts/**" = ["D", "T20", "S101", "S603", "S607", "INP001"]
 "noxfile.py" = ["D", "INP001"]
 "src/arbitr/cli/**" = ["FBT", "B008"]
+"src/arbitr/core/errors.py" = ["N818"]  # public names fixed by the API: ActionDenied, InFlight, ...
 
 # ---------------------------------------------------------------- mypy
 [tool.mypy]
@@ -135,6 +136,7 @@ filterwarnings = ["error"]
 markers = [
     "backend: runs against the backend in ARBITR_TEST_BACKEND (sqlite or postgres)",
     "slow: long running, excluded from ci-fast",
+    "sqlite_only: needs the executor on SQLite; deselected on the Postgres pass for now",
 ]
 
 # ---------------------------------------------------------------- coverage

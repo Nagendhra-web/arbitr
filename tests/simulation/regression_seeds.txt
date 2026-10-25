@@ -1,2 +1,4 @@
 # Seeds that once failed. One per line, optional comment after #.
 # Every seed here runs first in every simulation run.
+119  # ledger: a none tool under on_unknown: fail ran again from FAILED after UNKNOWN
+184  # ledger: the same bug in another interleaving

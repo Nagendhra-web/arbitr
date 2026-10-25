@@ -168,6 +168,28 @@
       "title": "Defaults",
       "type": "object"
     },
+    "ResourceCount": {
+      "additionalProperties": false,
+      "description": "More than ``value`` distinct resources of one kind (for example email recipients).",
+      "properties": {
+        "kind": {
+          "minLength": 1,
+          "title": "Kind",
+          "type": "string"
+        },
+        "value": {
+          "minimum": 0,
+          "title": "Value",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "kind",
+        "value"
+      ],
+      "title": "ResourceCount",
+      "type": "object"
+    },
     "ResourceDef": {
       "additionalProperties": false,
       "description": "A named resource with tags rules can match on.",
@@ -269,6 +291,20 @@
           ],
           "default": null
         },
+        "delay_seconds": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "maximum": 86400,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Delay Seconds"
+        },
         "id": {
           "title": "Id",
           "type": "string"
@@ -285,7 +321,8 @@
               "enum": [
                 "allow",
                 "deny",
-                "require_approval"
+                "require_approval",
+                "delay"
               ],
               "type": "string"
             },
@@ -488,6 +525,17 @@
           ],
           "default": null,
           "title": "Principal In"
+        },
+        "resource_count_gt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResourceCount"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "resource_ids_any": {
           "anyOf": [

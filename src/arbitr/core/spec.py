@@ -59,6 +59,8 @@ class ToolSpec(BaseModel):
     probe: str | None = None
     compensate: str | None = None
     redact: tuple[str, ...] = Field(default=())
+    credentials: tuple[str, ...] = Field(default=())
+    """Credentials the tool needs. Injected only at execution, after the gate allows it."""
 
     @field_validator("name")
     @classmethod

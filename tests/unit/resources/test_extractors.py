@@ -179,6 +179,25 @@ def test_kubectl_namespace_scopes_every_subcommand() -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    ("endpoint", "path"),
+    [
+        ("repos/octo/app/", "repos/octo/app"),
+        ("/repos//octo///app", "repos/octo/app"),
+        ("repos/octo/./app", "repos/octo/app"),
+        ("repos/octo/app/hooks/../", "repos/octo/app"),
+        ("repos/octo%2Fapp", "repos/octo/app"),
+        ("repos/octo/app/../../../../x", "x"),
+        ("/", ""),
+    ],
+)
+def test_gh_api_paths_are_normalized(endpoint: str, path: str) -> None:
+    found = classify_shell(f"gh api -X DELETE {endpoint}")
+    refs = [r.uri for r in found.resources if r.kind == "github_api"]
+    assert refs == ([path] if path else [])
+    assert found.effect == "destructive"
+
+
 def test_gh_api_urls_become_paths() -> None:
     found = classify_shell("gh api -X DELETE https://ghe.example.com/api/v3/repos/octo/app?x=1")
     refs = [r for r in found.resources if r.kind == "github_api"]

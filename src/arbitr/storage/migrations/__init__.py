@@ -117,4 +117,27 @@ CREATE TABLE tool_pins (
         "run scope manifest",
         "ALTER TABLE runs ADD COLUMN scope TEXT",
     ),
+    Migration(
+        3,
+        "execution: exact args flag, schedules, lease and approval indexes",
+        """
+ALTER TABLE intents ADD COLUMN args_exact INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE intents ADD COLUMN scheduled_for TEXT;
+CREATE INDEX intents_lease ON intents(state, lease_expires_at);
+CREATE INDEX intents_schedule ON intents(state, scheduled_for);
+CREATE INDEX approvals_intent ON approvals(intent_id)
+""",
+    ),
+    Migration(
+        4,
+        "budget reservations per intent",
+        """
+CREATE TABLE reservations (
+  intent_id TEXT NOT NULL REFERENCES intents(intent_id),
+  scope_key TEXT NOT NULL,
+  amount REAL NOT NULL CHECK (amount > 0),
+  PRIMARY KEY (intent_id, scope_key)
+)
+""",
+    ),
 )

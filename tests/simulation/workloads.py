@@ -6,7 +6,8 @@ two steps. A recovery pass on restart finishes logged but uncommitted
 increments. The apply step is keyed by operation id, like a native idempotency
 key, so the invariant is: every logged increment takes effect exactly once.
 
-It will be replaced by the real executor against fake storage and tools.
+It is fast enough to run on every seed. ledger_workload.py runs the real
+executor the same way on fewer seeds.
 """
 
 from __future__ import annotations

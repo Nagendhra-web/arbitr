@@ -2,11 +2,9 @@
 (***************************************************************************)
 (* Intent state machine.                                                  *)
 (*                                                                         *)
-(* Skeleton: models the legal transitions only. It will grow into        *)
-(* the full execution protocol (leases, commit points,                    *)
-(* crashes, concurrent workers, idempotency modes, recovery) and checks    *)
-(* AtMostOnceEffect, NoSilentRetry, NoExecuteWithoutLedger and             *)
-(* ApprovalBinding.                                                       *)
+(* Models the legal transitions only. ExecutionProtocol.tla models the   *)
+(* execution protocol (leases, commit points, crashes, workers, the       *)
+(* idempotency modes and recovery) and reuses this transition list.       *)
 (*                                                                         *)
 (* The Transitions set below is the single list that the Python transition *)
 (* table is checked against.                                              *)
@@ -17,7 +15,7 @@ CONSTANTS Intents, MaxAttempts
 
 States == {"PROPOSED", "DENIED", "PENDING_APPROVAL", "APPROVED", "REJECTED",
            "EXPIRED", "EXECUTING", "SUCCEEDED", "FAILED", "UNKNOWN",
-           "COMPENSATED"}
+           "COMPENSATED", "SCHEDULED", "CANCELLED"}
 
 \* BEGIN TRANSITIONS
 Transitions == {
@@ -35,11 +33,14 @@ Transitions == {
     <<"UNKNOWN", "SUCCEEDED">>,
     <<"UNKNOWN", "EXECUTING">>,
     <<"UNKNOWN", "FAILED">>,
-    <<"SUCCEEDED", "COMPENSATED">>
+    <<"SUCCEEDED", "COMPENSATED">>,
+    <<"APPROVED", "SCHEDULED">>,
+    <<"SCHEDULED", "EXECUTING">>,
+    <<"SCHEDULED", "CANCELLED">>
 }
 \* END TRANSITIONS
 
-Terminal == {"DENIED", "REJECTED", "EXPIRED", "COMPENSATED"}
+Terminal == {"DENIED", "REJECTED", "EXPIRED", "COMPENSATED", "CANCELLED"}
 
 VARIABLES state, attempt
 

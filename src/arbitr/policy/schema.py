@@ -34,6 +34,25 @@ from arbitr.policy import jsonpath
 from arbitr.policy.regex import compile_rule_regex
 
 Outcome = Literal["allow", "deny", "require_approval"]
+Verdict = Literal["allow", "deny", "require_approval", "delay"]
+"""What a rule's ``then`` can say: an outcome, or a delay (a cancel window)."""
+MAX_DELAY_SECONDS: Final = 86_400
+_DELAY_UNITS: Final = {"s": 1, "m": 60, "h": 3600}
+
+
+def _parse_delay(text: str) -> int:
+    """``delay 60s``, ``delay 5m``, ``delay 2h`` or ``delay 90`` (seconds) to seconds."""
+    parts = text.split()
+    if len(parts) != 2 or parts[0] != "delay":  # noqa: PLR2004, the word and the duration
+        raise ValueError("write a delay as 'delay 60s', 'delay 5m' or 'delay 2h'")
+    value = parts[1]
+    unit = value[-1] if value[-1] in _DELAY_UNITS else "s"
+    number = value[:-1] if value[-1] in _DELAY_UNITS else value
+    if not (number.isascii() and number.isdigit()):
+        raise ValueError("a delay is a whole number of seconds, minutes or hours")
+    return int(number) * _DELAY_UNITS[unit]
+
+
 EffectName = Literal["read", "write", "destructive", "external_comm", "financial"]
 ArgOp = Literal[
     "eq",
@@ -139,6 +158,13 @@ class TaintCondition(_Model):
     private_data: bool | None = None
 
 
+class ResourceCount(_Model):
+    """More than ``value`` distinct resources of one kind (for example email recipients)."""
+
+    kind: str = Field(min_length=1)
+    value: int = Field(ge=0)
+
+
 class When(_Model):
     """Conditions of a rule. All given conditions must hold."""
 
@@ -151,6 +177,7 @@ class When(_Model):
     resource_tags_any: tuple[str, ...] | None = None
     resource_tags_all: tuple[str, ...] | None = None
     resource_ids_any: tuple[str, ...] | None = None
+    resource_count_gt: ResourceCount | None = None
     run_taint: TaintCondition | None = None
     time_window: TimeWindowCondition | None = None
     args: tuple[ArgCondition, ...] | None = None
@@ -192,7 +219,8 @@ class Rule(_Model):
 
     id: str
     when: When
-    then: Outcome | None = None
+    then: Verdict | None = None
+    delay_seconds: float | None = Field(default=None, gt=0, le=MAX_DELAY_SECONDS)
     budget: Budget | None = None
     then_exceeded: Outcome | None = None
     reason: str = Field(min_length=1, max_length=500)
@@ -207,6 +235,19 @@ class Rule(_Model):
             )
         return value
 
+    @model_validator(mode="before")
+    @classmethod
+    def _split_delay(cls, data: object) -> object:
+        """Turn ``then: delay 60s`` into ``then: delay`` plus ``delay_seconds: 60``."""
+        if not isinstance(data, dict):
+            return data
+        then = data.get("then")
+        if isinstance(then, str) and then.strip().startswith("delay") and then.strip() != "delay":
+            if "delay_seconds" in data:
+                raise ValueError("give the delay once: in 'then' or in delay_seconds")
+            return {**data, "then": "delay", "delay_seconds": _parse_delay(then)}
+        return data
+
     @model_validator(mode="after")
     def _one_outcome(self) -> Rule:
         if self.budget is not None:
@@ -219,6 +260,8 @@ class Rule(_Model):
                 raise ValueError("a rule needs 'then' (allow, deny or require_approval)")
             if self.then_exceeded is not None:
                 raise ValueError("then_exceeded only applies to budget rules")
+        if (self.then == "delay") != (self.delay_seconds is not None):
+            raise ValueError("a delay needs a duration, for example 'then: delay 60s'")
         return self
 
 

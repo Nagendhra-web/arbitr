@@ -11,8 +11,9 @@ Evaluation:
 2. A budget rule fires only when charging this call would exceed its limit;
    otherwise it contributes a charge to reserve when the action runs. An
    amount that cannot be measured (missing or not a number) fires the rule.
-3. ``deny`` beats ``require_approval`` beats ``allow``. Among equal outcomes the
-   first matching rule in file order is the reason.
+3. ``deny`` beats ``require_approval`` beats ``delay`` beats ``allow``. Among
+   equal outcomes the first matching rule in file order is the reason; among
+   delays, the longest one (then the first) wins.
 4. If nothing matches, the policy default for the effect applies.
 5. In shadow mode the decision is recorded but the call is allowed, except
    that matching ``always_enforce`` rules still apply (the strictest of them).
@@ -38,7 +39,15 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
     from datetime import datetime
 
-    from arbitr.policy.schema import Budget, Outcome, Policy, Rule, When
+    from arbitr.policy.schema import (
+        Budget,
+        Outcome,
+        Policy,
+        ResourceCount,
+        Rule,
+        Verdict,
+        When,
+    )
 
 __all__ = [
     "RANK",
@@ -52,7 +61,7 @@ __all__ = [
     "decide",
 ]
 
-RANK: Final[dict[str, int]] = {"allow": 0, "require_approval": 1, "deny": 2}
+RANK: Final[dict[str, int]] = {"allow": 0, "delay": 1, "require_approval": 2, "deny": 3}
 OUTSIDE_SCOPE_REASON: Final = "The action is outside the scope declared for this run."
 
 
@@ -104,10 +113,11 @@ class RuleMatch:
     """One rule that matched, and what it asked for."""
 
     rule_id: str
-    outcome: Outcome
+    outcome: Verdict
     reason: str
     always_enforce: bool = False
     budget: bool = False
+    delay_seconds: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -124,13 +134,15 @@ class BudgetCharge:
 class Decision:
     """What the gate decided and why."""
 
-    outcome: Outcome
-    shadow_outcome: Outcome
+    outcome: Verdict
+    shadow_outcome: Verdict
     rule_id: str
     reason: str
     mode: Literal["enforce", "shadow"]
     matches: tuple[RuleMatch, ...] = ()
     charges: tuple[BudgetCharge, ...] = ()
+    delay_seconds: float = 0.0
+    """How long a ``delay`` outcome waits before the action runs (0 otherwise)."""
     shadow_rule_id: str = ""
     """The rule enforce mode would have applied (the same as rule_id in enforce mode)."""
     shadow_reason: str = ""
@@ -150,8 +162,8 @@ class Decision:
                 for m in self.matches
             )
             lines.append(
-                "Precedence: deny beats require_approval beats allow; among equal outcomes"
-                " the first rule in the policy wins."
+                "Precedence: deny beats require_approval beats delay beats allow; among"
+                " equal outcomes the first rule in the policy wins (for delays, the longest)."
             )
         else:
             lines.append("No rule matched, so the policy default for the effect applied.")
@@ -234,7 +246,13 @@ def _resources_ok(when: When, inp: GateInput, policy: Policy) -> bool:
         (when.resource_tags_any is None or bool(tags & set(when.resource_tags_any)))
         and (when.resource_tags_all is None or set(when.resource_tags_all) <= tags)
         and (when.resource_ids_any is None or bool(ids & set(when.resource_ids_any)))
+        and (when.resource_count_gt is None or _count_over(when.resource_count_gt, inp))
     )
+
+
+def _count_over(count: ResourceCount, inp: GateInput) -> bool:
+    """Distinct resources of the kind, across every argument (to, cc and bcc together)."""
+    return len({r.uri for r in inp.resources if r.kind == count.kind}) > count.value
 
 
 def _taint_ok(when: When, inp: GateInput, policy: Policy) -> bool:
@@ -276,7 +294,10 @@ def _evaluate_rule(
 ) -> tuple[RuleMatch | None, BudgetCharge | None]:
     if rule.budget is None:
         assert rule.then is not None  # noqa: S101, guaranteed by the schema
-        return RuleMatch(rule.id, rule.then, rule.reason, rule.always_enforce), None
+        delay = rule.delay_seconds or 0.0
+        return RuleMatch(
+            rule.id, rule.then, rule.reason, rule.always_enforce, delay_seconds=delay
+        ), None
     assert rule.then_exceeded is not None  # noqa: S101, guaranteed by the schema
     key = budget_key(rule.id, rule.budget, inp)
     amount = _measure(rule.budget, inp.args)
@@ -306,56 +327,56 @@ def decide(inp: GateInput, policy: Policy, counters: Mapping[str, float]) -> Dec
             charges.append(charge)
 
     if matches:
-        best = max(RANK[m.outcome] for m in matches)
-        winner = next(m for m in matches if RANK[m.outcome] == best)
-        enforced: Outcome = winner.outcome
-        rule_id, reason = winner.rule_id, winner.reason
+        winner = _strictest(matches)
     else:
-        enforced = _default(policy, inp.effect)
-        rule_id = "default"
-        reason = f"No rule matched; the policy default for {inp.effect} is {enforced}."
+        fallback = _default(policy, inp.effect)
+        reason = f"No rule matched; the policy default for {inp.effect} is {fallback}."
+        winner = RuleMatch("default", fallback, reason)
 
     # Outside the run's scope, on_outside_scope is a floor: it can make the
     # outcome stricter but never more lenient than the rules or the default.
     if inp.outside_scope:
         floor = RuleMatch("outside-scope", policy.on_outside_scope, OUTSIDE_SCOPE_REASON)
         matches.append(floor)
-        if RANK[floor.outcome] > RANK[enforced]:
-            enforced, rule_id, reason = floor.outcome, floor.rule_id, floor.reason
+        if RANK[floor.outcome] > RANK[winner.outcome]:
+            winner = floor
 
     # Enforce wins: a run cannot loosen an enforcing policy, and a policy in
     # shadow mode still enforces for a run that asks for it.
     mode: Literal["enforce", "shadow"] = (
         "shadow" if policy.mode == "shadow" and inp.mode != "enforce" else "enforce"
     )
-    outcome: Outcome = enforced
-    applied_rule, applied_reason = rule_id, reason
-    if mode == "shadow":
-        outcome, applied_rule, applied_reason = _shadow_outcome(matches)
+    applied = winner if mode == "enforce" else _shadow_winner(matches)
     return Decision(
-        outcome=outcome,
-        shadow_outcome=enforced,
-        rule_id=applied_rule,
-        reason=applied_reason,
+        outcome=applied.outcome,
+        shadow_outcome=winner.outcome,
+        rule_id=applied.rule_id,
+        reason=applied.reason,
         mode=mode,
         matches=tuple(matches),
-        charges=tuple(charges) if outcome != "deny" else (),
-        shadow_rule_id=rule_id,
-        shadow_reason=reason,
+        charges=tuple(charges) if applied.outcome != "deny" else (),
+        delay_seconds=applied.delay_seconds if applied.outcome == "delay" else 0.0,
+        shadow_rule_id=winner.rule_id,
+        shadow_reason=winner.reason,
     )
+
+
+def _strictest(matches: list[RuleMatch]) -> RuleMatch:
+    """The strictest match: the first among equals, or the longest among delays."""
+    best = max(RANK[m.outcome] for m in matches)
+    tied = [m for m in matches if RANK[m.outcome] == best]
+    return max(tied, key=lambda m: m.delay_seconds)  # max keeps the first of equal keys
 
 
 SHADOW_REASON: Final = "Shadow mode: the decision is recorded but not enforced."
 
 
-def _shadow_outcome(matches: list[RuleMatch]) -> tuple[Outcome, str, str]:
+def _shadow_winner(matches: list[RuleMatch]) -> RuleMatch:
     """In shadow mode only always_enforce rules apply; name the one that did."""
     hard = [m for m in matches if m.always_enforce]
     if not hard:
-        return "allow", "shadow-mode", SHADOW_REASON
-    best = max(RANK[m.outcome] for m in hard)
-    winner = next(m for m in hard if RANK[m.outcome] == best)
-    return winner.outcome, winner.rule_id, winner.reason
+        return RuleMatch("shadow-mode", "allow", SHADOW_REASON)
+    return _strictest(hard)
 
 
 def _default(policy: Policy, effect: Effect) -> Outcome:
