@@ -203,10 +203,10 @@ def test_transaction_is_dead_after_its_block(db: SQLiteStorage) -> None:
 
 
 def test_failed_migration_raises_storage_error(db: SQLiteStorage) -> None:
-    bad = Migration(2, "broken", "CREATE TABLE ok_table (x INTEGER); THIS IS NOT SQL")
-    with pytest.raises(StorageError, match="migration 2"):
+    bad = Migration(3, "broken", "CREATE TABLE ok_table (x INTEGER); THIS IS NOT SQL")
+    with pytest.raises(StorageError, match="migration 3"):
         db.migrate((*SQLITE, bad))
-    assert db.schema_version() == 1
+    assert db.schema_version() == len(SQLITE)
 
 
 def test_newer_schema_is_refused(tmp_path: Path) -> None:

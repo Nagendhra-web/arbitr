@@ -1,0 +1,95 @@
+# GitHub: no repository deletes, a human for CI workflow changes, visibility
+# changes, secret settings and release deletes, and no secrets in comments.
+# Covers the gh CLI through a shell tool (gh api calls are parsed into method and
+# path) and GitHub tools by name.
+version: 1
+resources:
+  - id: github.workflows
+    match: { kind: path, glob: "**/.github/workflows/**" }
+    tags: [ci-config]
+  - id: github.repos
+    match: { kind: github_repo }
+    tags: [github-repo]
+  - id: github.api-repo-delete
+    match: { kind: github_api, glob: "repos/*/*", attrs: { method: DELETE } }
+    tags: [repo-delete]
+  - id: github.api-secrets-put
+    match: { kind: github_api, glob: "repos/*/*/actions/secrets/**", attrs: { method: PUT } }
+    tags: [repo-secrets]
+  - id: github.api-secrets-delete
+    match: { kind: github_api, glob: "repos/*/*/actions/secrets/**", attrs: { method: DELETE } }
+    tags: [repo-secrets]
+  - id: github.api-org-secrets-put
+    match: { kind: github_api, glob: "orgs/*/actions/secrets/**", attrs: { method: PUT } }
+    tags: [repo-secrets]
+  - id: github.api-org-secrets-delete
+    match: { kind: github_api, glob: "orgs/*/actions/secrets/**", attrs: { method: DELETE } }
+    tags: [repo-secrets]
+rules:
+  - id: github.no-repo-delete-cli
+    when:
+      args:
+        - { path: "$.command", op: regex, value: "\\bgh\\b[^;|&]*\\brepo\\s+delete\\b" }
+    then: deny
+    reason: Deleting a GitHub repository is not allowed.
+  - id: github.no-repo-delete-tool
+    when: { tool_glob: "*delete*repo*" }
+    then: deny
+    reason: Deleting a GitHub repository is not allowed.
+  - id: github.no-repo-delete-tool-reversed
+    when: { tool_glob: "*repo*delete*" }
+    then: deny
+    reason: Deleting a GitHub repository is not allowed.
+  - id: github.no-repo-delete-api
+    when: { resource_tags_any: [repo-delete] }
+    then: deny
+    reason: Deleting a GitHub repository is not allowed.
+  - id: github.secret-settings-api
+    when: { resource_tags_any: [repo-secrets] }
+    then: require_approval
+    reason: Changing repository secrets needs a human.
+  - id: github.visibility-api
+    when:
+      args:
+        - { path: "$.command", op: regex, value: "\\bgh\\b[^;|&]*\\bapi\\b" }
+        - { path: "$.command", op: regex, value: "\\b(?:private=false|visibility=public)\\b" }
+    then: require_approval
+    reason: Making a repository public needs a human.
+  - id: github.ci-config-changes
+    when: { effect_in: [write, destructive], resource_tags_any: [ci-config] }
+    then: require_approval
+    reason: Changes to CI workflows need a human.
+  - id: github.visibility-cli
+    when:
+      args:
+        - { path: "$.command", op: regex, value: "\\bgh\\b[^;|&]*\\brepo\\s+edit\\b[^;|&]*--visibility" }
+    then: require_approval
+    reason: Changing repository visibility needs a human.
+  - id: github.made-public
+    when:
+      tool_glob: "*update_repo*"
+      args: [{ path: "$.private", op: eq, value: false }]
+    then: require_approval
+    reason: Making a repository public needs a human.
+  - id: github.visibility-tool
+    when:
+      tool_glob: "*update_repo*"
+      args: [{ path: "$.visibility", op: eq, value: public }]
+    then: require_approval
+    reason: Making a repository public needs a human.
+  - id: github.secret-settings
+    when:
+      args:
+        - { path: "$.command", op: regex, value: "\\bgh\\b[^;|&]*\\bsecret\\s+(?:set|delete|remove)\\b" }
+    then: require_approval
+    reason: Changing repository secrets needs a human.
+  - id: github.release-delete
+    when:
+      args:
+        - { path: "$.command", op: regex, value: "\\bgh\\b[^;|&]*\\brelease\\s+delete\\b" }
+    then: require_approval
+    reason: Deleting a release needs a human.
+  - id: github.no-secrets-in-comments
+    when: { effect: external_comm, outbound_findings_any: [secret] }
+    then: deny
+    reason: Issues, pull requests and comments must not contain secrets.

@@ -1,0 +1,170 @@
+cases:
+  - name: a normal email is allowed
+    tool: email.send
+    effect: external_comm
+    args: { to: "team@example.com", subject: "Weekly update", body: "Revenue grew 12% this week." }
+    expect: allow
+  - name: an AWS key in the body is denied
+    tool: email.send
+    effect: external_comm
+    args: { to: "x@example.com", body: "key AKIAQWERTYUIOPASDFGH" }  # gitleaks:allow (fake secret for the DLP test)
+    expect: deny
+    expect_rule: email-and-messaging.no-secrets
+  - name: an Anthropic key in the body is denied
+    tool: email.send
+    effect: external_comm
+    args: { to: "x@example.com", body: "found sk-ant-api03-Zq7pwZq7pwZq7pwZq7pwZq7pwZq7pw in a file" }  # gitleaks:allow (fake secret for the DLP test)
+    expect: deny
+  - name: a GitHub token in a chat message is denied
+    tool: slack.post_message
+    effect: external_comm
+    args: { channel: "#general", text: "token ghp_a1B2c3D4e5a1B2c3D4e5a1B2c3D4e5a1B2c3D4e5" }  # gitleaks:allow (fake secret for the DLP test)
+    expect: deny
+  - name: a private key block is denied
+    tool: email.send
+    effect: external_comm
+    args: { to: "x@example.com", body: "-----BEGIN RSA PRIVATE KEY-----\nMIIEow-----END RSA PRIVATE KEY-----" }  # gitleaks:allow (fake secret for the DLP test)
+    expect: deny
+  - name: a card number is denied
+    tool: email.send
+    effect: external_comm
+    args: { to: "x@example.com", body: "card 4111 1111 1111 1111" }
+    expect: deny
+    expect_rule: email-and-messaging.no-card-numbers
+  - name: a number that fails the card check is allowed
+    tool: email.send
+    effect: external_comm
+    args: { to: "x@example.com", body: "order 4111 1111 1111 1112" }
+    expect: allow
+  - name: a phone number is allowed
+    tool: email.send
+    effect: external_comm
+    args: { to: "x@example.com", body: "call me at +1 415 555 0100" }
+    expect: allow
+  - name: an email address in the body is allowed
+    tool: email.send
+    effect: external_comm
+    args: { to: "x@example.com", body: "cc support@example.com next time" }
+    expect: allow
+  - name: a recipient that is not an address needs approval
+    tool: email.send
+    effect: external_comm
+    args: { to: "bob", body: "hello" }
+    expect: require_approval
+    expect_rule: email-and-messaging.unparsed-recipients
+  - name: one bad recipient in a list needs approval
+    tool: email.send
+    effect: external_comm
+    args: { to: "bob@example.com, not an address", body: "hello" }
+    expect: require_approval
+  - name: the 21st email in a run is denied
+    tool: email.send
+    effect: external_comm
+    args: { to: "x@example.com", body: "hi" }
+    counters: { "rule:email-and-messaging.mass-email|run:run": 20 }
+    expect: deny
+    expect_rule: email-and-messaging.mass-email
+  - name: the 20th email in a run is allowed
+    tool: email.send
+    effect: external_comm
+    args: { to: "x@example.com", body: "hi" }
+    counters: { "rule:email-and-messaging.mass-email|run:run": 19 }
+    expect: allow
+  - name: the email count is per run
+    tool: email.send
+    effect: external_comm
+    run_id: run-2
+    args: { to: "x@example.com", body: "hi" }
+    counters: { "rule:email-and-messaging.mass-email|run:run": 20 }
+    expect: allow
+  - name: more than 50 bcc recipients needs approval
+    tool: email.send
+    effect: external_comm
+    args: { bcc: ["u0@example.com", "u1@example.com", "u2@example.com", "u3@example.com", "u4@example.com", "u5@example.com", "u6@example.com", "u7@example.com", "u8@example.com", "u9@example.com", "u10@example.com", "u11@example.com", "u12@example.com", "u13@example.com", "u14@example.com", "u15@example.com", "u16@example.com", "u17@example.com", "u18@example.com", "u19@example.com", "u20@example.com", "u21@example.com", "u22@example.com", "u23@example.com", "u24@example.com", "u25@example.com", "u26@example.com", "u27@example.com", "u28@example.com", "u29@example.com", "u30@example.com", "u31@example.com", "u32@example.com", "u33@example.com", "u34@example.com", "u35@example.com", "u36@example.com", "u37@example.com", "u38@example.com", "u39@example.com", "u40@example.com", "u41@example.com", "u42@example.com", "u43@example.com", "u44@example.com", "u45@example.com", "u46@example.com", "u47@example.com", "u48@example.com", "u49@example.com", "u50@example.com"], body: "news" }
+    expect: require_approval
+    expect_rule: email-and-messaging.many-bcc
+  - name: more than 50 recipients needs approval
+    tool: email.send
+    effect: external_comm
+    args: { to: ["u0@example.com", "u1@example.com", "u2@example.com", "u3@example.com", "u4@example.com", "u5@example.com", "u6@example.com", "u7@example.com", "u8@example.com", "u9@example.com", "u10@example.com", "u11@example.com", "u12@example.com", "u13@example.com", "u14@example.com", "u15@example.com", "u16@example.com", "u17@example.com", "u18@example.com", "u19@example.com", "u20@example.com", "u21@example.com", "u22@example.com", "u23@example.com", "u24@example.com", "u25@example.com", "u26@example.com", "u27@example.com", "u28@example.com", "u29@example.com", "u30@example.com", "u31@example.com", "u32@example.com", "u33@example.com", "u34@example.com", "u35@example.com", "u36@example.com", "u37@example.com", "u38@example.com", "u39@example.com", "u40@example.com", "u41@example.com", "u42@example.com", "u43@example.com", "u44@example.com", "u45@example.com", "u46@example.com", "u47@example.com", "u48@example.com", "u49@example.com", "u50@example.com"], body: "news" }
+    expect: require_approval
+    expect_rule: email-and-messaging.many-recipients
+  - name: copied private content needs approval
+    tool: email.send
+    effect: external_comm
+    args: { to: "x@example.com", body: "summary" }
+    outbound_findings: [private_content]
+    expect: require_approval
+    expect_rule: email-and-messaging.private-content
+  - name: a message that could not be scanned needs approval
+    tool: email.send
+    effect: external_comm
+    args: { to: "x@example.com", body: "summary" }
+    outbound_findings: [unscannable]
+    expect: require_approval
+  - name: a secret in the subject is denied
+    tool: email.send
+    effect: external_comm
+    args: { to: "x@example.com", subject: "key AKIAQWERTYUIOPASDFGH", body: "see subject" }  # gitleaks:allow (fake secret for the DLP test)
+    expect: deny
+  - name: a secret in an attachment is denied
+    tool: email.send
+    effect: external_comm
+    args: { to: "x@example.com", attachments: [{ name: "notes.txt", text: "sk-ant-api03-Zq7pwZq7pwZq7pwZq7pwZq7pwZq7pw" }] }  # gitleaks:allow (fake secret for the DLP test)
+    expect: deny
+  - name: a card number in a text message is denied
+    tool: sms.send
+    effect: external_comm
+    args: { to: "+14155550100", text: "card 4111111111111111" }
+    expect: deny
+  - name: a secret posted to a webhook is denied
+    tool: http.post
+    effect: external_comm
+    args: { url: "https://hooks.example.com/x", json: { text: "ghp_a1B2c3D4e5a1B2c3D4e5a1B2c3D4e5a1B2c3D4e5" } }  # gitleaks:allow (fake secret for the DLP test)
+    expect: deny
+  - name: a password inside a URL is denied
+    tool: email.send
+    effect: external_comm
+    args: { to: "x@example.com", body: "use https://admin:Zq7pw-S3cret@db.example.com/app" }  # gitleaks:allow (fake secret for the DLP test)
+    expect: deny
+  - name: a JWT is denied
+    tool: email.send
+    effect: external_comm
+    args: { to: "x@example.com", body: "bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.c2lnbmF0dXJlLXZhbHVlLTEyMzQ" }  # gitleaks:allow (fake secret for the DLP test)
+    expect: deny
+  - name: a password assignment is denied
+    tool: slack.post_message
+    effect: external_comm
+    args: { channel: "#ops", text: "password: Zq7pw-hunter22" }  # gitleaks:allow (fake secret for the DLP test)
+    expect: deny
+  - name: reading an email with a secret in it is not outbound
+    tool: email.read
+    effect: read
+    args: { folder: "inbox", query: "AKIAQWERTYUIOPASDFGH" }  # gitleaks:allow (fake secret for the DLP test)
+    expect: allow
+  - name: writing a secret to a local file is not outbound
+    tool: fs.write
+    args: { path: "/srv/scratch/key.txt", content: "AKIAQWERTYUIOPASDFGH" }  # gitleaks:allow (fake secret for the DLP test)
+    expect: allow
+  - name: a shadow run cannot loosen this pack
+    tool: email.send
+    effect: external_comm
+    mode: shadow
+    args: { to: "x@example.com", body: "key AKIAQWERTYUIOPASDFGH" }  # gitleaks:allow (fake secret for the DLP test)
+    expect: deny
+  - name: a normal chat message is allowed
+    tool: slack.post_message
+    effect: external_comm
+    args: { channel: "#deploys", text: "Deployed v1.24.3 to staging." }
+    expect: allow
+  - name: private content in a chat message needs approval
+    tool: teams.send
+    effect: external_comm
+    args: { chat: "c-1", text: "summary" }
+    outbound_findings: [private_content]
+    expect: require_approval
+  - name: a benign report with many numbers is allowed
+    tool: email.send
+    effect: external_comm
+    args: { to: "x@example.com", body: "Order 4155550100 shipped 2026-10-25, invoice INV-2026-000123, total 1,234.56 USD." }
+    expect: allow

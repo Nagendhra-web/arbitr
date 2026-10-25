@@ -112,4 +112,9 @@ CREATE TABLE tool_pins (
 );
 """,
     ),
+    Migration(
+        2,
+        "run scope manifest",
+        "ALTER TABLE runs ADD COLUMN scope TEXT",
+    ),
 )

@@ -1,0 +1,45 @@
+# Payments: small refunds go through, larger ones and all charges, payouts and
+# transfers need a human, and a daily refund cap stops a slow drain.
+# Tools are matched by name and the financial effect: any financial tool with
+# refund, charge, payout or transfer in its name, such as payments.refund or
+# stripe.refunds.create. Read tools such as payments.list_refunds are not matched.
+version: 1
+rules:
+  - id: payments.small-refunds
+    when:
+      tool_glob: "*refund*"
+      effect: financial
+      args:
+        - { path: "$.amount", op: gt, value: 0 }
+        - { path: "$.amount", op: lte, value: 100 }
+    then: allow
+    reason: Refunds of up to 100 go through without a human.
+  - id: payments.large-refunds
+    when:
+      tool_glob: "*refund*"
+      effect: financial
+      args: [{ path: "$.amount", op: gt, value: 100 }]
+    then: require_approval
+    reason: Refunds over 100 need a human.
+  - id: payments.refund-daily-cap
+    when: { tool_glob: "*refund*", effect: financial }
+    budget: { scope: [principal, day], sum_path: "$.amount", limit: 1000 }
+    then_exceeded: deny
+    reason: The daily refund cap of 1000 is reached.
+  - id: payments.refunds-per-run
+    when: { tool_glob: "*refund*", effect: financial }
+    budget: { scope: [run], count: true, limit: 20 }
+    then_exceeded: deny
+    reason: More than 20 refunds in one run looks like a loop.
+  - id: payments.charges
+    when: { tool_glob: "*charge*", effect: financial }
+    then: require_approval
+    reason: Charging a customer needs a human.
+  - id: payments.payouts
+    when: { tool_glob: "*payout*", effect: financial }
+    then: require_approval
+    reason: Payouts need a human.
+  - id: payments.transfers
+    when: { tool_glob: "*transfer*", effect: financial }
+    then: require_approval
+    reason: Money transfers need a human.

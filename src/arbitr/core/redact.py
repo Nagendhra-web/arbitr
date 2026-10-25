@@ -64,8 +64,13 @@ DETECTORS: Final[tuple[tuple[str, re.Pattern[str]], ...]] = (
     ("jwt", re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}")),
     ("bearer_token", re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{16,}")),
     ("basic_auth", re.compile(r"(?i)\bbasic\s+[A-Za-z0-9+/]{8,}={0,2}")),
-    # user:password@host in any URL; only the password is replaced.
-    ("url_credentials", re.compile(r"(?i)\b[a-z][a-z0-9+.-]*://[^/\s:@]+:([^/\s@]+)@")),
+    # user:password@host in any URL; only the password is replaced. The scheme
+    # part is bounded (at most 32 characters right before "://"), so long runs of
+    # word characters scan in linear time and a long prefix cannot hide a match.
+    (
+        "url_credentials",
+        re.compile(r"(?i)[a-z0-9+.-]{1,32}://[^/\s:@]+:([^/\s@]+)@"),
+    ),
     (
         "assigned_secret",
         # Also matches JSON and quoted forms such as "password": "...".

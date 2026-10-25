@@ -1,0 +1,147 @@
+cases:
+  - name: git status is allowed
+    tool: shell.run
+    args: { command: "git status" }
+    expect: allow
+  - name: pushing a feature branch is allowed
+    tool: shell.run
+    args: { command: "git push origin feature/login" }
+    expect: allow
+  - name: pushing to main needs approval
+    tool: shell.run
+    args: { command: "git push origin main" }
+    expect: require_approval
+    expect_rule: git.push-protected
+  - name: force pushing main is denied
+    tool: shell.run
+    args: { command: "git push --force origin main" }
+    expect: deny
+    expect_rule: git.no-force-push-protected
+  - name: force pushing master with -f is denied
+    tool: shell.run
+    args: { command: "git push -f origin master" }
+    expect: deny
+  - name: force pushing a feature branch needs approval
+    tool: shell.run
+    args: { command: "git push --force origin feature/login" }
+    expect: require_approval
+    expect_rule: git.force-push
+  - name: a plus refspec to main is a force push
+    tool: shell.run
+    args: { command: "git push origin +main" }
+    expect: deny
+  - name: an empty source refspec deletes main
+    tool: shell.run
+    args: { command: "git push origin :main" }
+    expect: deny
+  - name: deleting main on the remote is denied
+    tool: shell.run
+    args: { command: "git push origin --delete main" }
+    expect: deny
+  - name: deleting a feature branch on the remote needs approval
+    tool: shell.run
+    args: { command: "git push origin --delete feature/old" }
+    expect: require_approval
+  - name: pushing HEAD to main needs approval
+    tool: shell.run
+    args: { command: "git push origin HEAD:main" }
+    expect: require_approval
+  - name: force with lease to production is denied
+    tool: shell.run
+    args: { command: "git push --force-with-lease origin HEAD:production" }
+    expect: deny
+  - name: a hard reset needs approval by default
+    tool: shell.run
+    args: { command: "git reset --hard HEAD~1" }
+    expect: require_approval
+    expect_rule: default
+  - name: clean -fdx needs approval
+    tool: shell.run
+    args: { command: "git clean -fdx" }
+    expect: require_approval
+  - name: a dry run clean is allowed
+    tool: shell.run
+    args: { command: "git clean -n" }
+    expect: allow
+  - name: committing is allowed
+    tool: shell.run
+    args: { command: "git commit -m 'Fix the login test'" }
+    expect: allow
+  - name: deleting a local branch with -D needs approval
+    tool: shell.run
+    args: { command: "git branch -D old-work" }
+    expect: require_approval
+  - name: discarding local changes needs approval
+    tool: shell.run
+    args: { command: "git checkout -- ." }
+    expect: require_approval
+  - name: git log is allowed
+    tool: shell.run
+    args: { command: "git log --oneline -20" }
+    expect: allow
+  - name: a config that runs a command needs approval
+    tool: shell.run
+    args: { command: "git -c core.sshCommand='sh -c id' fetch" }
+    expect: require_approval
+  - name: a mirror push needs approval
+    tool: shell.run
+    args: { command: "git push --mirror backup" }
+    expect: require_approval
+    expect_rule: git.force-push
+  - name: rebasing is allowed
+    tool: shell.run
+    args: { command: "git rebase main" }
+    expect: allow
+  - name: pushing a release branch is allowed
+    tool: shell.run
+    args: { command: "git push origin release-2026-10" }
+    expect: allow
+  - name: a force push hidden in sh -c is denied
+    tool: shell.run
+    args: { command: "sh -c 'git push --force origin main'" }
+    expect: deny
+  - name: a force push with -C is denied
+    tool: shell.run
+    args: { command: "git -C repo push -f origin main" }
+    expect: deny
+  - name: dropping a stash needs approval
+    tool: shell.run
+    args: { command: "git stash drop" }
+    expect: require_approval
+  - name: rewriting history needs approval
+    tool: shell.run
+    args: { command: "git filter-branch --tree-filter 'rm -f secrets.txt' HEAD" }
+    expect: require_approval
+  - name: pulling is allowed
+    tool: shell.run
+    args: { command: "git pull" }
+    expect: allow
+  - name: fetching everything is allowed
+    tool: shell.run
+    args: { command: "git fetch --all" }
+    expect: allow
+  - name: pushing to upstream main needs approval
+    tool: shell.run
+    args: { command: "git push upstream main" }
+    expect: require_approval
+  - name: force with lease to a feature branch needs approval
+    tool: shell.run
+    args: { command: "git push --force-with-lease origin feature/x" }
+    expect: require_approval
+  - name: deleting a local tag is allowed
+    tool: shell.run
+    args: { command: "git tag -d v0.1.0-rc1" }
+    expect: allow
+  - name: a second refspec to main needs approval
+    tool: shell.run
+    args: { command: "git push origin feature/x main" }
+    expect: require_approval
+    expect_rule: git.push-protected
+  - name: a full ref name to main is still main
+    tool: shell.run
+    args: { command: "git push -f origin HEAD:refs/heads/main" }
+    expect: deny
+  - name: a push in a chain is still checked
+    tool: shell.run
+    args: { command: "git add . && git commit -m wip && git push -f origin main" }
+    expect: deny

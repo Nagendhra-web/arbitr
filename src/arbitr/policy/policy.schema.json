@@ -1,0 +1,721 @@
+{
+  "$defs": {
+    "ApprovalSettings": {
+      "additionalProperties": false,
+      "description": "How approvals behave.",
+      "properties": {
+        "expires_after": {
+          "default": "PT15M",
+          "format": "duration",
+          "title": "Expires After",
+          "type": "string"
+        },
+        "wait_seconds": {
+          "default": 0,
+          "maximum": 3600,
+          "minimum": 0,
+          "title": "Wait Seconds",
+          "type": "integer"
+        }
+      },
+      "title": "ApprovalSettings",
+      "type": "object"
+    },
+    "ArgCondition": {
+      "additionalProperties": false,
+      "description": "A test on the tool arguments: ``{path, op, value}``.",
+      "properties": {
+        "op": {
+          "enum": [
+            "eq",
+            "ne",
+            "in",
+            "not_in",
+            "gt",
+            "gte",
+            "lt",
+            "lte",
+            "glob",
+            "regex",
+            "contains",
+            "exists",
+            "len_gt"
+          ],
+          "title": "Op",
+          "type": "string"
+        },
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "value": {
+          "default": null,
+          "title": "Value"
+        }
+      },
+      "required": [
+        "path",
+        "op"
+      ],
+      "title": "ArgCondition",
+      "type": "object"
+    },
+    "Budget": {
+      "additionalProperties": false,
+      "description": "A running limit: a sum of an argument, or a count of calls, per scope.",
+      "properties": {
+        "count": {
+          "default": false,
+          "title": "Count",
+          "type": "boolean"
+        },
+        "limit": {
+          "exclusiveMinimum": 0,
+          "title": "Limit",
+          "type": "number"
+        },
+        "scope": {
+          "items": {
+            "enum": [
+              "principal",
+              "agent",
+              "run",
+              "tool",
+              "day",
+              "hour"
+            ],
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Scope",
+          "type": "array"
+        },
+        "sum_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sum Path"
+        }
+      },
+      "required": [
+        "scope",
+        "limit"
+      ],
+      "title": "Budget",
+      "type": "object"
+    },
+    "Defaults": {
+      "additionalProperties": false,
+      "description": "The outcome per effect when no rule matches. Safe by default.",
+      "properties": {
+        "destructive": {
+          "default": "require_approval",
+          "enum": [
+            "allow",
+            "deny",
+            "require_approval"
+          ],
+          "title": "Destructive",
+          "type": "string"
+        },
+        "external_comm": {
+          "default": "allow",
+          "enum": [
+            "allow",
+            "deny",
+            "require_approval"
+          ],
+          "title": "External Comm",
+          "type": "string"
+        },
+        "financial": {
+          "default": "require_approval",
+          "enum": [
+            "allow",
+            "deny",
+            "require_approval"
+          ],
+          "title": "Financial",
+          "type": "string"
+        },
+        "read": {
+          "default": "allow",
+          "enum": [
+            "allow",
+            "deny",
+            "require_approval"
+          ],
+          "title": "Read",
+          "type": "string"
+        },
+        "write": {
+          "default": "allow",
+          "enum": [
+            "allow",
+            "deny",
+            "require_approval"
+          ],
+          "title": "Write",
+          "type": "string"
+        }
+      },
+      "title": "Defaults",
+      "type": "object"
+    },
+    "ResourceDef": {
+      "additionalProperties": false,
+      "description": "A named resource with tags rules can match on.",
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "match": {
+          "$ref": "#/$defs/ResourceMatch"
+        },
+        "tags": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Tags",
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "match"
+      ],
+      "title": "ResourceDef",
+      "type": "object"
+    },
+    "ResourceMatch": {
+      "additionalProperties": false,
+      "description": "How a resource definition recognizes an extracted resource.",
+      "properties": {
+        "attrs": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Attrs"
+        },
+        "glob": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Glob"
+        },
+        "kind": {
+          "title": "Kind",
+          "type": "string"
+        },
+        "uri_glob": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Uri Glob"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "title": "ResourceMatch",
+      "type": "object"
+    },
+    "Rule": {
+      "additionalProperties": false,
+      "description": "One policy rule: conditions, then an outcome (or a budget and its outcome).",
+      "properties": {
+        "always_enforce": {
+          "default": false,
+          "title": "Always Enforce",
+          "type": "boolean"
+        },
+        "budget": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Budget"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "reason": {
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Reason",
+          "type": "string"
+        },
+        "then": {
+          "anyOf": [
+            {
+              "enum": [
+                "allow",
+                "deny",
+                "require_approval"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Then"
+        },
+        "then_exceeded": {
+          "anyOf": [
+            {
+              "enum": [
+                "allow",
+                "deny",
+                "require_approval"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Then Exceeded"
+        },
+        "when": {
+          "$ref": "#/$defs/When"
+        }
+      },
+      "required": [
+        "id",
+        "when",
+        "reason"
+      ],
+      "title": "Rule",
+      "type": "object"
+    },
+    "TaintCondition": {
+      "additionalProperties": false,
+      "description": "Matches on run taint flags. Unset flags are not checked.",
+      "properties": {
+        "private_data": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Private Data"
+        },
+        "untrusted_input": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Untrusted Input"
+        }
+      },
+      "title": "TaintCondition",
+      "type": "object"
+    },
+    "TimeWindowCondition": {
+      "additionalProperties": false,
+      "description": "Matches while the named window is active.",
+      "properties": {
+        "cron_active": {
+          "title": "Cron Active",
+          "type": "string"
+        }
+      },
+      "required": [
+        "cron_active"
+      ],
+      "title": "TimeWindowCondition",
+      "type": "object"
+    },
+    "When": {
+      "additionalProperties": false,
+      "description": "Conditions of a rule. All given conditions must hold.",
+      "properties": {
+        "agent_in": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Agent In"
+        },
+        "args": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/ArgCondition"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Args"
+        },
+        "effect": {
+          "anyOf": [
+            {
+              "enum": [
+                "read",
+                "write",
+                "destructive",
+                "external_comm",
+                "financial"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Effect"
+        },
+        "effect_in": {
+          "anyOf": [
+            {
+              "items": {
+                "enum": [
+                  "read",
+                  "write",
+                  "destructive",
+                  "external_comm",
+                  "financial"
+                ],
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Effect In"
+        },
+        "outbound_findings_any": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Outbound Findings Any"
+        },
+        "outside_scope": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Outside Scope"
+        },
+        "principal_in": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Principal In"
+        },
+        "resource_ids_any": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Resource Ids Any"
+        },
+        "resource_tags_all": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Resource Tags All"
+        },
+        "resource_tags_any": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Resource Tags Any"
+        },
+        "run_taint": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TaintCondition"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "scope_required": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Scope Required"
+        },
+        "time_window": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TimeWindowCondition"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "tool": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tool"
+        },
+        "tool_glob": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tool Glob"
+        }
+      },
+      "title": "When",
+      "type": "object"
+    },
+    "Window": {
+      "additionalProperties": false,
+      "description": "A named time window, ``start`` inclusive and ``end`` exclusive.",
+      "properties": {
+        "end": {
+          "format": "date-time",
+          "title": "End",
+          "type": "string"
+        },
+        "start": {
+          "format": "date-time",
+          "title": "Start",
+          "type": "string"
+        }
+      },
+      "required": [
+        "start",
+        "end"
+      ],
+      "title": "Window",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "A whole policy file.",
+  "properties": {
+    "approval": {
+      "$ref": "#/$defs/ApprovalSettings",
+      "default": {
+        "expires_after": "PT15M",
+        "wait_seconds": 0
+      }
+    },
+    "default": {
+      "$ref": "#/$defs/Defaults",
+      "default": {
+        "destructive": "require_approval",
+        "external_comm": "allow",
+        "financial": "require_approval",
+        "read": "allow",
+        "write": "allow"
+      }
+    },
+    "exclude_rules": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Exclude Rules",
+      "type": "array"
+    },
+    "include": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Include",
+      "type": "array"
+    },
+    "mode": {
+      "default": "enforce",
+      "enum": [
+        "enforce",
+        "shadow"
+      ],
+      "title": "Mode",
+      "type": "string"
+    },
+    "on_outside_scope": {
+      "default": "require_approval",
+      "enum": [
+        "allow",
+        "deny",
+        "require_approval"
+      ],
+      "title": "On Outside Scope",
+      "type": "string"
+    },
+    "on_unknown": {
+      "default": "require_approval",
+      "enum": [
+        "require_approval",
+        "fail",
+        "retry"
+      ],
+      "title": "On Unknown",
+      "type": "string"
+    },
+    "resources": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/ResourceDef"
+      },
+      "title": "Resources",
+      "type": "array"
+    },
+    "rules": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Rule"
+      },
+      "title": "Rules",
+      "type": "array"
+    },
+    "version": {
+      "const": 1,
+      "title": "Version",
+      "type": "integer"
+    },
+    "windows": {
+      "additionalProperties": {
+        "$ref": "#/$defs/Window"
+      },
+      "title": "Windows",
+      "type": "object"
+    }
+  },
+  "required": [
+    "version"
+  ],
+  "title": "Arbitr policy",
+  "type": "object"
+}

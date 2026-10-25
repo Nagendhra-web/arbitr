@@ -33,6 +33,24 @@ class JsonPathError(ArbitrError, ValueError):
     code: ClassVar[str] = "invalid_json_path"
 
 
+class PolicyError(ArbitrError, ValueError):
+    """A policy file is malformed or invalid. The old policy keeps running."""
+
+    code: ClassVar[str] = "invalid_policy"
+
+
+class ScopeError(ArbitrError, ValueError):
+    """A run tried to take a scope wider than its parent's."""
+
+    code: ClassVar[str] = "scope_widened"
+
+
+class ResourceError(ArbitrError, RuntimeError):
+    """A tool's resource extractor failed. The action does not run (fail closed)."""
+
+    code: ClassVar[str] = "resource_extractor_failed"
+
+
 class IntentError(ArbitrError, ValueError):
     """A tool call cannot be turned into an intent (bad arguments or identifiers)."""
 

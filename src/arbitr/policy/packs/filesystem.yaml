@@ -1,0 +1,112 @@
+# Filesystem: keep agents away from system folders, backups and key files.
+# Deleting a folder counts as deleting everything inside it, so removing /var
+# is treated like removing /var/backups.
+version: 1
+resources:
+  - id: filesystem.etc
+    match: { kind: path, glob: "/etc/**" }
+    tags: [system]
+  - id: filesystem.usr
+    match: { kind: path, glob: "/usr/**" }
+    tags: [system]
+  - id: filesystem.bin
+    match: { kind: path, glob: "/bin/**" }
+    tags: [system]
+  - id: filesystem.sbin
+    match: { kind: path, glob: "/sbin/**" }
+    tags: [system]
+  - id: filesystem.boot
+    match: { kind: path, glob: "/boot/**" }
+    tags: [system]
+  - id: filesystem.lib
+    match: { kind: path, glob: "/lib/**" }
+    tags: [system]
+  - id: filesystem.var-lib
+    match: { kind: path, glob: "/var/lib/**" }
+    tags: [system]
+  - id: filesystem.dev
+    match: { kind: path, glob: "/dev/**" }
+    tags: [system]
+  - id: filesystem.windows
+    match: { kind: path, glob: "c:/windows/**" }
+    tags: [system]
+  - id: filesystem.var-backups
+    match: { kind: path, glob: "/var/backups/**" }
+    tags: [backup]
+  - id: filesystem.backups
+    match: { kind: path, glob: "/backups/**" }
+    tags: [backup]
+  - id: filesystem.mnt-backup
+    match: { kind: path, glob: "/mnt/backup/**" }
+    tags: [backup]
+  - id: filesystem.home-ssh
+    match: { kind: path, glob: "~/.ssh/**" }
+    tags: [secrets]
+  - id: filesystem.users-ssh
+    match: { kind: path, glob: "/home/*/.ssh/**" }
+    tags: [secrets]
+  - id: filesystem.root-ssh
+    match: { kind: path, glob: "/root/.ssh/**" }
+    tags: [secrets]
+  - id: filesystem.env-files
+    match: { kind: path, glob: "**/.env" }
+    tags: [secrets]
+  - id: filesystem.cloud-credentials
+    match: { kind: path, glob: "~/.aws/**" }
+    tags: [secrets]
+  - id: filesystem.users-aws
+    match: { kind: path, glob: "/home/*/.aws/**" }
+    tags: [secrets]
+  - id: filesystem.root-aws
+    match: { kind: path, glob: "/root/.aws/**" }
+    tags: [secrets]
+  - id: filesystem.gcloud
+    match: { kind: path, glob: "~/.config/gcloud/**" }
+    tags: [secrets]
+  - id: filesystem.users-gcloud
+    match: { kind: path, glob: "/home/*/.config/gcloud/**" }
+    tags: [secrets]
+  - id: filesystem.azure
+    match: { kind: path, glob: "~/.azure/**" }
+    tags: [secrets]
+  - id: filesystem.users-azure
+    match: { kind: path, glob: "/home/*/.azure/**" }
+    tags: [secrets]
+  - id: filesystem.kube
+    match: { kind: path, glob: "~/.kube/**" }
+    tags: [secrets]
+  - id: filesystem.users-kube
+    match: { kind: path, glob: "/home/*/.kube/**" }
+    tags: [secrets]
+  - id: filesystem.root-kube
+    match: { kind: path, glob: "/root/.kube/**" }
+    tags: [secrets]
+rules:
+  - id: filesystem.no-destroy-system
+    when: { effect: destructive, resource_tags_any: [system] }
+    then: deny
+    reason: Deleting or overwriting system files is not allowed.
+  - id: filesystem.no-destroy-backups
+    when: { effect: destructive, resource_tags_any: [backup] }
+    then: deny
+    reason: Deleting backups is not allowed.
+  - id: filesystem.no-change-secrets
+    when: { effect_in: [write, destructive, external_comm], resource_tags_any: [secrets] }
+    then: deny
+    reason: Changing or sending key and secret files is not allowed.
+  - id: filesystem.read-secrets
+    when: { effect: read, resource_tags_any: [secrets] }
+    then: require_approval
+    reason: Reading key and secret files needs a human.
+  - id: filesystem.system-writes
+    when: { effect: write, resource_tags_any: [system] }
+    then: require_approval
+    reason: Changes under system folders need a human.
+  - id: filesystem.backup-writes
+    when: { effect: write, resource_tags_any: [backup] }
+    then: require_approval
+    reason: Changes to backups need a human.
+  - id: filesystem.unresolved-destructive
+    when: { effect: destructive, resource_tags_any: ["arbitr:unresolved-path"] }
+    then: require_approval
+    reason: Deleting a relative or variable path needs a human, because where it points is unknown.

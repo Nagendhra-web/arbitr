@@ -1,0 +1,161 @@
+cases:
+  - name: reading a file through MCP is allowed
+    tool: "mcp:fs/read_file"
+    effect: read
+    args: { path: "/srv/app/README.md" }
+    expect: allow
+  - name: writing a file through MCP is allowed
+    tool: "mcp:fs/write_file"
+    args: { path: "/srv/app/notes.txt", content: "hi" }
+    expect: allow
+  - name: a destructive MCP tool needs approval
+    tool: "mcp:fs/delete_file"
+    effect: destructive
+    args: { path: "/srv/app/old.txt" }
+    expect: require_approval
+    expect_rule: mcp-basics.destructive
+  - name: a Claude Code style MCP name is matched
+    tool: mcp__fs__delete_file
+    effect: destructive
+    args: { path: "/srv/app/old.txt" }
+    expect: require_approval
+    expect_rule: mcp-basics.destructive
+  - name: an MCP payment needs approval
+    tool: "mcp:stripe/create_refund"
+    effect: financial
+    args: { amount: 10 }
+    expect: require_approval
+    expect_rule: mcp-basics.financial
+  - name: a secret sent by an MCP tool is denied
+    tool: "mcp:slack/post_message"
+    effect: external_comm
+    args: { channel: "#x", text: "key AKIAQWERTYUIOPASDFGH" }  # gitleaks:allow (fake secret for the DLP test)
+    expect: deny
+    expect_rule: mcp-basics.no-secrets-out
+  - name: a normal MCP message is allowed
+    tool: "mcp:slack/post_message"
+    effect: external_comm
+    args: { channel: "#x", text: "Build passed." }
+    expect: allow
+  - name: an MCP message after untrusted input needs approval
+    tool: "mcp:slack/post_message"
+    effect: external_comm
+    run_taint: { untrusted_input: true }
+    args: { channel: "#x", text: "Build passed." }
+    expect: require_approval
+    expect_rule: mcp-basics.outbound-after-untrusted
+  - name: an MCP message after only private data is allowed
+    tool: "mcp:slack/post_message"
+    effect: external_comm
+    run_taint: { private_data: true }
+    args: { channel: "#x", text: "Build passed." }
+    expect: allow
+  - name: an unscannable MCP message needs approval
+    tool: "mcp:email/send"
+    effect: external_comm
+    outbound_findings: [unscannable]
+    args: { to: "x@example.com", body: "x" }
+    expect: require_approval
+    expect_rule: mcp-basics.unscannable-out
+  - name: running a command through MCP needs approval
+    tool: mcp__shell__run_command
+    args: { command: "ls -la" }
+    expect: require_approval
+    expect_rule: mcp-basics.command-tools
+  - name: a destructive command through MCP needs approval
+    tool: mcp__shell__run_command
+    args: { command: "rm -rf /srv/app/tmp" }
+    expect: require_approval
+    expect_rule: mcp-basics.destructive
+  - name: an exec tool through MCP needs approval
+    tool: "mcp:docker/exec"
+    args: { container: "web", cmd: ["ls"] }
+    expect: require_approval
+    expect_rule: mcp-basics.exec-tools
+  - name: a read-only command tool is allowed
+    tool: "mcp:shell/list_commands"
+    effect: read
+    args: {}
+    expect: allow
+  - name: a non-MCP destructive tool falls to the default
+    tool: fs.delete
+    effect: destructive
+    args: { path: "/srv/app/old.txt" }
+    expect: require_approval
+    expect_rule: default
+  - name: a non-MCP message after untrusted input is not this pack's concern
+    tool: slack.post_message
+    effect: external_comm
+    run_taint: { untrusted_input: true }
+    args: { channel: "#x", text: "hello" }
+    expect: allow
+  - name: an MCP search is allowed
+    tool: "mcp:web/search"
+    effect: read
+    args: { query: "arbitr ledger" }
+    expect: allow
+  - name: an MCP fetch is allowed
+    tool: "mcp:web/fetch"
+    effect: read
+    args: { url: "https://example.com" }
+    expect: allow
+  - name: an MCP SQL drop raises the effect and needs approval
+    tool: "mcp:postgres/query"
+    effect: read
+    args: { sql: "DROP TABLE users" }
+    expect: require_approval
+    expect_rule: mcp-basics.destructive
+  - name: an MCP SQL select is allowed
+    tool: "mcp:postgres/query"
+    effect: read
+    args: { sql: "SELECT 1" }
+    expect: allow
+  - name: an MCP issue comment with a secret is denied
+    tool: mcp__github__add_issue_comment
+    effect: external_comm
+    args: { body: "AKIAQWERTYUIOPASDFGH" }  # gitleaks:allow (fake secret for the DLP test)
+    expect: deny
+  - name: an MCP issue comment after untrusted input needs approval
+    tool: mcp__github__add_issue_comment
+    effect: external_comm
+    run_taint: { untrusted_input: true }
+    args: { body: "Thanks!" }
+    expect: require_approval
+  - name: an MCP tool with an unknown effect defaults to write and is allowed
+    tool: "mcp:notes/save"
+    args: { text: "remember this" }
+    expect: allow
+  - name: an MCP calendar write is allowed
+    tool: "mcp:calendar/create_event"
+    args: { title: "Standup" }
+    expect: allow
+  - name: an MCP delete through a command line needs approval
+    tool: mcp__shell__run_command
+    args: { command: "git push --force origin main" }
+    expect: require_approval
+  - name: a shadow run cannot loosen this pack
+    tool: "mcp:slack/post_message"
+    effect: external_comm
+    mode: shadow
+    args: { channel: "#x", text: "AKIAQWERTYUIOPASDFGH" }  # gitleaks:allow (fake secret for the DLP test)
+    expect: deny
+  - name: an MCP card number is allowed by this pack
+    tool: "mcp:email/send"
+    effect: external_comm
+    args: { to: "x@example.com", body: "card 4111 1111 1111 1111" }
+    expect: allow
+  - name: an MCP payout needs approval
+    tool: mcp__bank__payout
+    effect: financial
+    args: { amount: 5 }
+    expect: require_approval
+  - name: an MCP outbound tool after both taints needs approval
+    tool: "mcp:email/send"
+    effect: external_comm
+    run_taint: { untrusted_input: true, private_data: true }
+    args: { to: "x@example.com", body: "hi" }
+    expect: require_approval
+  - name: an MCP destructive kubectl call needs approval
+    tool: mcp__k8s__run_command
+    args: { command: "kubectl delete pod web-1" }
+    expect: require_approval

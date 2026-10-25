@@ -1,0 +1,179 @@
+cases:
+  - name: a small refund goes through
+    tool: payments.refund
+    effect: financial
+    args: { order_id: "o-1", amount: 20 }
+    expect: allow
+    expect_rule: payments.small-refunds
+  - name: a refund of exactly 100 goes through
+    tool: payments.refund
+    effect: financial
+    args: { order_id: "o-2", amount: 100 }
+    expect: allow
+  - name: a refund just over 100 needs approval
+    tool: payments.refund
+    effect: financial
+    args: { order_id: "o-3", amount: 100.01 }
+    expect: require_approval
+    expect_rule: payments.large-refunds
+  - name: a large refund needs approval
+    tool: payments.refund
+    effect: financial
+    args: { order_id: "o-4", amount: 500 }
+    expect: require_approval
+  - name: a refund without an amount is denied by the cap
+    tool: payments.refund
+    effect: financial
+    args: { order_id: "o-5" }
+    expect: deny
+    expect_rule: payments.refund-daily-cap
+  - name: a negative refund is denied by the cap
+    tool: payments.refund
+    effect: financial
+    args: { order_id: "o-6", amount: -5 }
+    expect: deny
+  - name: a refund that would pass the daily cap is denied
+    tool: payments.refund
+    effect: financial
+    args: { order_id: "o-7", amount: 50 }
+    counters: { "rule:payments.refund-daily-cap|principal:tester|day:2026-01-05": 980 }
+    expect: deny
+    expect_rule: payments.refund-daily-cap
+  - name: a refund that stays under the daily cap goes through
+    tool: payments.refund
+    effect: financial
+    args: { order_id: "o-8", amount: 50 }
+    counters: { "rule:payments.refund-daily-cap|principal:tester|day:2026-01-05": 900 }
+    expect: allow
+  - name: a refund that lands exactly on the cap goes through
+    tool: payments.refund
+    effect: financial
+    args: { order_id: "o-9", amount: 100 }
+    counters: { "rule:payments.refund-daily-cap|principal:tester|day:2026-01-05": 900 }
+    expect: allow
+  - name: once the cap is used up even a small refund is denied
+    tool: payments.refund
+    effect: financial
+    args: { order_id: "o-10", amount: 1 }
+    counters: { "rule:payments.refund-daily-cap|principal:tester|day:2026-01-05": 1000 }
+    expect: deny
+  - name: the cap is per principal
+    tool: payments.refund
+    effect: financial
+    principal: alice
+    args: { order_id: "o-11", amount: 50 }
+    counters: { "rule:payments.refund-daily-cap|principal:tester|day:2026-01-05": 1000 }
+    expect: allow
+  - name: the cap is per day
+    tool: payments.refund
+    effect: financial
+    now: 2026-01-06T09:00:00Z
+    args: { order_id: "o-12", amount: 50 }
+    counters: { "rule:payments.refund-daily-cap|principal:tester|day:2026-01-05": 1000 }
+    expect: allow
+  - name: an amount that is not a number is denied by the cap
+    tool: payments.refund
+    effect: financial
+    args: { order_id: "o-13", amount: "lots" }
+    expect: deny
+  - name: the 21st refund in one run is denied
+    tool: payments.refund
+    effect: financial
+    args: { order_id: "o-14", amount: 5 }
+    counters: { "rule:payments.refunds-per-run|run:run": 20 }
+    expect: deny
+    expect_rule: payments.refunds-per-run
+  - name: the 20th refund in one run goes through
+    tool: payments.refund
+    effect: financial
+    args: { order_id: "o-15", amount: 5 }
+    counters: { "rule:payments.refunds-per-run|run:run": 19 }
+    expect: allow
+  - name: the refund count is per run
+    tool: payments.refund
+    effect: financial
+    run_id: run-2
+    args: { order_id: "o-16", amount: 5 }
+    counters: { "rule:payments.refunds-per-run|run:run": 20 }
+    expect: allow
+  - name: a provider refund tool name is matched
+    tool: stripe.refunds.create
+    effect: financial
+    args: { charge: "ch_1", amount: 30 }
+    expect: allow
+  - name: a large provider refund needs approval
+    tool: stripe.refunds.create
+    effect: financial
+    args: { charge: "ch_1", amount: 300 }
+    expect: require_approval
+  - name: a charge needs approval
+    tool: payments.charge
+    effect: financial
+    args: { customer: "c-1", amount: 10 }
+    expect: require_approval
+    expect_rule: payments.charges
+  - name: a payout needs approval
+    tool: payments.payout
+    effect: financial
+    args: { account: "acct-1", amount: 10 }
+    expect: require_approval
+    expect_rule: payments.payouts
+  - name: a transfer needs approval
+    tool: bank.transfer
+    effect: financial
+    args: { to: "acct-2", amount: 10 }
+    expect: require_approval
+    expect_rule: payments.transfers
+  - name: an unknown financial tool needs approval by default
+    tool: billing.adjust
+    effect: financial
+    args: { amount: 10 }
+    expect: require_approval
+    expect_rule: default
+  - name: reading a payment is allowed
+    tool: payments.get
+    effect: read
+    args: { payment_id: "p-1" }
+    expect: allow
+  - name: a read tool with refund in its name is not touched
+    tool: payments.list_refunds
+    effect: read
+    args: { limit: 10 }
+    expect: allow
+  - name: a shadow run cannot loosen this pack
+    tool: payments.refund
+    effect: financial
+    mode: shadow
+    args: { order_id: "o-17", amount: 5000 }
+    expect: deny
+  - name: a refund of zero falls to the financial default
+    tool: payments.refund
+    effect: financial
+    args: { order_id: "o-18", amount: 0 }
+    expect: require_approval
+    expect_rule: default
+  - name: a refund with the amount as a string is denied by the cap
+    tool: payments.refund
+    effect: financial
+    args: { order_id: "o-19", amount: "20" }
+    expect: deny
+  - name: a mid-size refund goes through
+    tool: payments.refund
+    effect: financial
+    args: { order_id: "o-20", amount: 99.99 }
+    expect: allow
+  - name: a refund over the cap in one go is denied
+    tool: payments.refund
+    effect: financial
+    args: { order_id: "o-21", amount: 1500 }
+    expect: deny
+  - name: charging a card through a provider tool needs approval
+    tool: stripe.charges.create
+    effect: financial
+    args: { amount: 500, currency: "usd" }
+    expect: require_approval
+  - name: a payout batch needs approval
+    tool: payouts.batch
+    effect: financial
+    args: { count: 12 }
+    expect: require_approval

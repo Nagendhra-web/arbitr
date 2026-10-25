@@ -1,0 +1,57 @@
+# Kubernetes: no namespace deletes, nothing destructive in kube-system or
+# production namespaces, a human for production changes and node operations.
+# Production namespaces: prod and production.
+version: 1
+resources:
+  - id: kubernetes.objects
+    match: { kind: kubernetes }
+    tags: [k8s]
+  - id: kubernetes.ns
+    match: { kind: kubernetes, uri_glob: "ns/*" }
+    tags: [namespace]
+  - id: kubernetes.namespace
+    match: { kind: kubernetes, uri_glob: "namespace/*" }
+    tags: [namespace]
+  - id: kubernetes.namespaces
+    match: { kind: kubernetes, uri_glob: "namespaces/*" }
+    tags: [namespace]
+  - id: kubernetes.kube-system
+    match: { kind: kubernetes, attrs: { namespace: kube-system } }
+    tags: [k8s-system]
+  - id: kubernetes.prod
+    match: { kind: kubernetes, attrs: { namespace: prod } }
+    tags: [production]
+  - id: kubernetes.production
+    match: { kind: kubernetes, attrs: { namespace: production } }
+    tags: [production]
+rules:
+  - id: kubernetes.no-delete-namespace
+    when: { effect: destructive, resource_tags_any: [namespace] }
+    then: deny
+    reason: Deleting a whole namespace is not allowed.
+  - id: kubernetes.no-destroy-system
+    when: { effect: destructive, resource_tags_any: [k8s-system] }
+    then: deny
+    reason: Destructive changes in kube-system are not allowed.
+  - id: kubernetes.no-destroy-production
+    when: { effect: destructive, resource_tags_all: [production, k8s] }
+    then: deny
+    reason: Destructive changes in a production namespace are not allowed.
+  - id: kubernetes.system-changes
+    when: { effect: write, resource_tags_any: [k8s-system] }
+    then: require_approval
+    reason: Changes in kube-system need a human.
+  - id: kubernetes.production-changes
+    when: { effect: write, resource_tags_all: [production, k8s] }
+    then: require_approval
+    reason: Commands in a production namespace need a human.
+  - id: kubernetes.destructive
+    when: { effect: destructive, resource_tags_any: [k8s] }
+    then: require_approval
+    reason: Destructive Kubernetes changes need a human.
+  - id: kubernetes.node-operations
+    when:
+      args:
+        - { path: "$.command", op: regex, value: "\\bkubectl\\b[^;|&]*\\b(?:drain|cordon|taint)\\b" }
+    then: require_approval
+    reason: Draining, cordoning or tainting nodes needs a human.

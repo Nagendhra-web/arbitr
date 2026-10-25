@@ -1,1 +1,1 @@
-"""Built-in resource extractors."""
+"""Built-in resource extractors for common argument shapes."""

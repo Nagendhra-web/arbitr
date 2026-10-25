@@ -36,3 +36,8 @@ Thumbs.db
 # Local agent state (not project source)
 .omc/
 .claude/settings.local.json
+
+# Local secrets. Never commit.
+.env
+.env.*
+!.env.example

@@ -1,0 +1,41 @@
+# Lethal trifecta: untrusted input + private data + outbound communication.
+# An outbound message after the run read both needs a human; copying private
+# content or a secret out after untrusted input is denied. These rules are
+# enforced in shadow mode too.
+version: 1
+rules:
+  - id: lethal-trifecta.outbound-after-both
+    when:
+      effect: external_comm
+      run_taint: { untrusted_input: true, private_data: true }
+    then: require_approval
+    always_enforce: true
+    reason: The run read untrusted input and private data, so an outbound message needs a human.
+  - id: lethal-trifecta.private-copy-after-untrusted
+    when:
+      effect: external_comm
+      run_taint: { untrusted_input: true }
+      outbound_findings_any: [private_content]
+    then: deny
+    always_enforce: true
+    reason: Sending private content out after reading untrusted input is not allowed.
+  - id: lethal-trifecta.secrets-after-untrusted
+    when:
+      effect: external_comm
+      run_taint: { untrusted_input: true }
+      outbound_findings_any: [secret]
+    then: deny
+    always_enforce: true
+    reason: Sending a secret out after reading untrusted input is not allowed.
+  - id: lethal-trifecta.unscannable-after-untrusted
+    when:
+      effect: external_comm
+      run_taint: { untrusted_input: true }
+      outbound_findings_any: [unscannable]
+    then: require_approval
+    always_enforce: true
+    reason: This message could not be checked and the run read untrusted input.
+  - id: lethal-trifecta.private-content-out
+    when: { effect: external_comm, outbound_findings_any: [private_content] }
+    then: require_approval
+    reason: This message repeats private content the run read earlier.

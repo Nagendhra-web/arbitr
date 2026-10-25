@@ -23,6 +23,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
+    "google-re2>=1.1",
     "pydantic>=2.7",
     "pyyaml>=6.0",
 ]

@@ -1,0 +1,159 @@
+cases:
+  - name: select on production is allowed
+    tool: db.query
+    effect: read
+    args: { dsn: "postgres://app@db.prod.internal/orders", sql: "SELECT * FROM orders" }
+    expect: allow
+  - name: select on staging is allowed
+    tool: db.query
+    effect: read
+    args: { dsn: "postgres://app@db.staging.internal/orders", sql: "SELECT 1" }
+    expect: allow
+  - name: insert on staging is allowed
+    tool: db.exec
+    args: { dsn: "postgres://app@db.staging.internal/orders", sql: "INSERT INTO t VALUES (1)" }
+    expect: allow
+  - name: insert on production needs approval
+    tool: db.exec
+    args: { dsn: "postgres://app@db.prod.internal/orders", sql: "INSERT INTO t VALUES (1)" }
+    expect: require_approval
+    expect_rule: databases.production-writes
+  - name: update with a where clause on production needs approval
+    tool: db.exec
+    args: { dsn: "postgres://app@db.prod.internal/orders", sql: "UPDATE t SET a = 1 WHERE id = 2" }
+    expect: require_approval
+    expect_rule: databases.production-writes
+  - name: update without a where clause on production is denied
+    tool: db.exec
+    args: { dsn: "postgres://app@db.prod.internal/orders", sql: "UPDATE users SET admin = true" }
+    expect: deny
+    expect_rule: databases.no-destroy-production
+  - name: delete without a where clause on staging needs approval
+    tool: db.exec
+    args: { dsn: "postgres://app@db.staging.internal/orders", sql: "DELETE FROM sessions" }
+    expect: require_approval
+    expect_rule: databases.destructive-sql
+  - name: delete with a where clause on staging is allowed
+    tool: db.exec
+    args: { dsn: "postgres://app@db.staging.internal/orders", sql: "DELETE FROM sessions WHERE id = 3" }
+    expect: allow
+  - name: drop table on production is denied
+    tool: db.exec
+    args: { dsn: "postgres://app@db.prod.internal/orders", sql: "DROP TABLE users" }
+    expect: deny
+    expect_rule: databases.no-destroy-production
+  - name: drop table on staging needs approval
+    tool: db.exec
+    args: { dsn: "postgres://app@db.staging.internal/orders", sql: "DROP TABLE users" }
+    expect: require_approval
+    expect_rule: databases.destructive-sql
+  - name: truncate on production is denied
+    tool: db.exec
+    args: { dsn: "mysql://app@prod-mysql:3306/shop", sql: "TRUNCATE orders" }
+    expect: deny
+  - name: alter table on staging needs approval
+    tool: db.exec
+    args: { dsn: "postgres://app@db.staging.internal/orders", sql: "ALTER TABLE t ADD COLUMN x INT" }
+    expect: require_approval
+  - name: alter table on production is denied
+    tool: db.exec
+    args: { dsn: "postgres://app@db.prod.internal/orders", sql: "ALTER TABLE t DROP COLUMN x" }
+    expect: deny
+  - name: an always-true where clause counts as no where clause
+    tool: db.exec
+    args: { dsn: "postgres://app@db.staging.internal/orders", sql: "DELETE FROM t WHERE 1=1" }
+    expect: require_approval
+    expect_rule: databases.destructive-sql
+  - name: a drop inside a string literal is only a read
+    tool: db.query
+    effect: read
+    args: { dsn: "postgres://app@db.prod.internal/orders", sql: "SELECT 'DROP TABLE users'" }
+    expect: allow
+  - name: a drop inside a comment is only a read
+    tool: db.query
+    effect: read
+    args: { dsn: "postgres://app@db.prod.internal/orders", sql: "SELECT 1 -- DROP TABLE users" }
+    expect: allow
+  - name: a drop after a select in a read tool is denied on production
+    tool: db.query
+    effect: read
+    args: { dsn: "postgres://app@db.prod.internal/orders", sql: "SELECT 1; DROP TABLE users" }
+    expect: deny
+  - name: a MySQL executable comment is code
+    tool: db.exec
+    args: { dsn: "mysql://app@prod-mysql/shop", sql: "/*! DROP TABLE users */" }
+    expect: deny
+  - name: a DO block that drops a table needs approval on staging
+    tool: db.exec
+    args: { dsn: "postgres://app@db.staging.internal/orders", sql: "DO $$ BEGIN DROP TABLE x; END $$" }
+    expect: require_approval
+  - name: dynamic SQL on production is denied
+    tool: db.exec
+    args: { dsn: "postgres://app@db.prod.internal/orders", sql: "EXECUTE format('DELETE FROM %I', t)" }
+    expect: deny
+  - name: create table on staging is allowed
+    tool: db.exec
+    args: { dsn: "postgres://app@db.staging.internal/orders", sql: "CREATE TABLE t (id INT)" }
+    expect: allow
+  - name: create table on production needs approval
+    tool: db.exec
+    args: { dsn: "postgres://app@db.prod.internal/orders", sql: "CREATE TABLE t (id INT)" }
+    expect: require_approval
+  - name: create or replace table on production is denied
+    tool: db.exec
+    args: { dsn: "postgres://app@db.prod.internal/orders", sql: "CREATE OR REPLACE TABLE t AS SELECT 1" }
+    expect: deny
+  - name: grant on production needs approval
+    tool: db.exec
+    args: { dsn: "postgres://app@db.prod.internal/orders", sql: "GRANT SELECT ON t TO bob" }
+    expect: require_approval
+  - name: psql dropping a production table from the shell is denied
+    tool: shell.run
+    args: { command: "psql postgres://app@db.prod.internal/orders -c 'DROP TABLE users'" }
+    expect: deny
+    expect_rule: databases.no-destroy-production
+  - name: psql reading staging from the shell is allowed
+    tool: shell.run
+    args: { command: "psql postgres://app@db.staging.internal/orders -c 'SELECT 1'" }
+    expect: allow
+  - name: a key-value DSN pointing at production is recognized
+    tool: db.exec
+    args: { dsn: "host=db.prod.internal dbname=orders user=app", sql: "DELETE FROM t" }
+    expect: deny
+  - name: a database given by name is recognized
+    tool: db.exec
+    args: { database: "orders_prod", sql: "TRUNCATE t" }
+    expect: deny
+  - name: destructive SQL with no database still needs approval
+    tool: db.exec
+    args: { sql: "DROP TABLE users" }
+    expect: require_approval
+    expect_rule: databases.destructive-sql
+  - name: a read with no database is allowed
+    tool: db.query
+    effect: read
+    args: { sql: "SELECT * FROM users" }
+    expect: allow
+  - name: merge that deletes rows needs approval on staging
+    tool: db.exec
+    args:
+      dsn: "postgres://app@db.staging.internal/orders"
+      sql: "MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN DELETE"
+    expect: require_approval
+  - name: copy from a program is destructive
+    tool: db.exec
+    args: { dsn: "postgres://app@db.staging.internal/orders", sql: "COPY t FROM PROGRAM 'id'" }
+    expect: require_approval
+  - name: a production host hidden in the query string is found
+    tool: db.exec
+    args: { dsn: "postgres://localhost/orders?host=db.prod.internal", sql: "DELETE FROM t" }
+    expect: deny
+  - name: production in upper case is still production
+    tool: db.exec
+    args: { database: "Orders_PROD", sql: "TRUNCATE t" }
+    expect: deny
+  - name: a shadow run cannot loosen this pack
+    tool: db.exec
+    mode: shadow
+    args: { dsn: "postgres://app@db.prod.internal/orders", sql: "DROP TABLE users" }
+    expect: deny

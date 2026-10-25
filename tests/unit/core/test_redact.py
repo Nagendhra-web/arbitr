@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from arbitr.core.canonical import canonical_json
-from arbitr.core.redact import MARKER_PREFIX, Redactor, luhn_valid
+from arbitr.core.redact import DETECTORS, MARKER_PREFIX, Redactor, luhn_valid
 
 KEY = b"k" * 32
 R = Redactor(KEY)
@@ -152,3 +154,19 @@ def test_ordinary_scalars_pass_through_and_card_integers_do_not() -> None:
 )
 def test_luhn(digits: str, valid: bool) -> None:
     assert luhn_valid(digits) is valid
+
+
+@pytest.mark.parametrize("unit", ["a-", "aa", "1.", "x:", "a@"])
+def test_detectors_run_in_linear_time(unit: str) -> None:
+    text = unit * 100_000
+    started = time.perf_counter()
+    for _, pattern in DETECTORS:
+        pattern.search(text)
+    assert time.perf_counter() - started < 2.0
+
+
+def test_url_credentials_after_a_long_scheme_like_prefix_are_redacted() -> None:
+    redactor = Redactor(b"k" * 32)
+    hidden = "Zq7pw-" + "hunter2"
+    text = "x" * 60 + "://bob:" + hidden + "@db.example.com/app"
+    assert hidden not in str(redactor.redact(text))

@@ -1,0 +1,30 @@
+# Git: no force pushes to protected branches, a human for pushes to them.
+# Protected branches: main, master and production. Add your own by copying
+# the git.main resource with another branch name.
+version: 1
+resources:
+  - id: git.remotes
+    match: { kind: git_remote }
+    tags: [git-remote]
+  - id: git.main
+    match: { kind: git_remote, attrs: { branch: main } }
+    tags: [protected-branch]
+  - id: git.master
+    match: { kind: git_remote, attrs: { branch: master } }
+    tags: [protected-branch]
+  - id: git.production
+    match: { kind: git_remote, attrs: { branch: production } }
+    tags: [protected-branch]
+rules:
+  - id: git.no-force-push-protected
+    when: { effect: destructive, resource_tags_any: [protected-branch] }
+    then: deny
+    reason: Force pushing to or deleting a protected branch is not allowed.
+  - id: git.force-push
+    when: { effect: destructive, resource_tags_any: [git-remote] }
+    then: require_approval
+    reason: Force pushes and remote branch deletes need a human.
+  - id: git.push-protected
+    when: { effect: write, resource_tags_any: [protected-branch] }
+    then: require_approval
+    reason: Pushing straight to a protected branch needs a human.

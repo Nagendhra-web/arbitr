@@ -51,7 +51,7 @@ def seed_run(db: SQLiteStorage) -> None:
 def test_fresh_database_is_migrated_with_durable_settings(tmp_path: Path) -> None:
     path = tmp_path / "ledger.db"
     with SQLiteStorage.open(path, Redactor(KEY)) as db:
-        assert db.schema_version() == 1
+        assert db.schema_version() == len(SQLITE)
         assert len(db.install_id()) == 26
     conn = sqlite3.connect(path)
     assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
@@ -87,20 +87,20 @@ def test_reopening_keeps_install_id_and_applies_nothing(tmp_path: Path) -> None:
 
 def test_new_migrations_apply_in_order(db: SQLiteStorage) -> None:
     extra = (
-        Migration(3, "three", "CREATE TABLE t3 (x INTEGER)"),
-        Migration(2, "two", "CREATE TABLE t2 (x INTEGER); CREATE TABLE t2b (y INTEGER)"),
+        Migration(4, "four", "CREATE TABLE t4 (x INTEGER)"),
+        Migration(3, "three", "CREATE TABLE t3 (x INTEGER); CREATE TABLE t3b (y INTEGER)"),
     )
 
-    assert db.migrate((*SQLITE, *extra)) == [2, 3]
-    assert db.schema_version() == 3
+    assert db.migrate((*SQLITE, *extra)) == [3, 4]
+    assert db.schema_version() == 4
 
 
 def test_failed_migration_rolls_back(db: SQLiteStorage) -> None:
 
-    bad = Migration(2, "broken", "CREATE TABLE ok_table (x INTEGER); THIS IS NOT SQL")
-    with pytest.raises(StorageError, match="migration 2"):
+    bad = Migration(3, "broken", "CREATE TABLE ok_table (x INTEGER); THIS IS NOT SQL")
+    with pytest.raises(StorageError, match="migration 3"):
         db.migrate((*SQLITE, bad))
-    assert db.schema_version() == 1
+    assert db.schema_version() == len(SQLITE)
     names = {r[0] for r in db._conn.execute("SELECT name FROM sqlite_master")}
     assert "ok_table" not in names
 

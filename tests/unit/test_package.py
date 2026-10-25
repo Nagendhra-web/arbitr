@@ -18,12 +18,16 @@ def test_py_typed_is_shipped() -> None:
 
 
 def test_core_dependencies_stay_minimal() -> None:
-    """The core needs only pydantic and pyyaml. Everything else is an extra."""
+    """The core needs pydantic, pyyaml and RE2. Everything else is an extra.
+
+    RE2 is in the core because policy regexes match agent-controlled text and
+    must run in linear time; a backtracking engine would let input stall the gate.
+    """
     requires = importlib.metadata.requires("arbitr") or []
     core = {
         re.split(r"[ <>=!~;\[]", r, maxsplit=1)[0].lower() for r in requires if "extra ==" not in r
     }
-    assert core == {"pydantic", "pyyaml"}
+    assert core == {"pydantic", "pyyaml", "google-re2"}
 
 
 def test_declared_extras() -> None:

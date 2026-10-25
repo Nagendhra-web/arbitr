@@ -1,0 +1,36 @@
+# MCP basics: safe defaults for tools that come from MCP servers. Tools are
+# matched by name: anything starting with "mcp", which covers the proxy's
+# "mcp:<server>/<tool>" and Claude Code's "mcp__<server>__<tool>" names.
+version: 1
+rules:
+  - id: mcp-basics.destructive
+    when: { tool_glob: "mcp*", effect: destructive }
+    then: require_approval
+    reason: Destructive MCP tool calls need a human.
+  - id: mcp-basics.financial
+    when: { tool_glob: "mcp*", effect: financial }
+    then: require_approval
+    reason: MCP tools that move money need a human.
+  - id: mcp-basics.no-secrets-out
+    when: { tool_glob: "mcp*", effect: external_comm, outbound_findings_any: [secret] }
+    then: deny
+    reason: MCP tools must not send secrets out.
+  - id: mcp-basics.outbound-after-untrusted
+    when:
+      tool_glob: "mcp*"
+      effect: external_comm
+      run_taint: { untrusted_input: true }
+    then: require_approval
+    reason: Sending data out after reading untrusted content needs a human.
+  - id: mcp-basics.unscannable-out
+    when: { tool_glob: "mcp*", effect: external_comm, outbound_findings_any: [unscannable] }
+    then: require_approval
+    reason: This outbound call could not be fully checked, so it needs a human.
+  - id: mcp-basics.command-tools
+    when: { tool_glob: "mcp*command*", effect: write }
+    then: require_approval
+    reason: Running commands through an MCP server needs a human.
+  - id: mcp-basics.exec-tools
+    when: { tool_glob: "mcp*exec*", effect: write }
+    then: require_approval
+    reason: Running commands through an MCP server needs a human.

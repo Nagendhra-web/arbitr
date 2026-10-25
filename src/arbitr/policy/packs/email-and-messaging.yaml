@@ -1,0 +1,46 @@
+# Email and messaging: outbound messages never carry secrets or card numbers,
+# copies of private content and unreadable messages need a human, recipients
+# that do not parse need a human, and loops cannot mass-send.
+version: 1
+resources:
+  - id: email-and-messaging.unparsed
+    match: { kind: email, attrs: { domain: unparsed } }
+    tags: [unparsed-recipient]
+rules:
+  - id: email-and-messaging.no-secrets
+    when: { effect: external_comm, outbound_findings_any: [secret] }
+    then: deny
+    reason: Outbound messages must not contain secrets.
+  - id: email-and-messaging.no-card-numbers
+    when: { effect: external_comm, outbound_findings_any: ["pii:card"] }
+    then: deny
+    reason: Outbound messages must not contain card numbers.
+  - id: email-and-messaging.private-content
+    when: { effect: external_comm, outbound_findings_any: [private_content] }
+    then: require_approval
+    reason: This message repeats private content the run read earlier.
+  - id: email-and-messaging.unscannable
+    when: { effect: external_comm, outbound_findings_any: [unscannable] }
+    then: require_approval
+    reason: This message could not be fully checked, so it needs a human.
+  - id: email-and-messaging.unparsed-recipients
+    when: { effect: external_comm, resource_tags_any: [unparsed-recipient] }
+    then: require_approval
+    reason: A recipient is not a valid address, so it needs a human.
+  - id: email-and-messaging.many-recipients
+    when:
+      effect: external_comm
+      args: [{ path: "$.to", op: len_gt, value: 50 }]
+    then: require_approval
+    reason: Messages to more than 50 recipients need a human.
+  - id: email-and-messaging.many-bcc
+    when:
+      effect: external_comm
+      args: [{ path: "$.bcc", op: len_gt, value: 50 }]
+    then: require_approval
+    reason: Messages to more than 50 recipients need a human.
+  - id: email-and-messaging.mass-email
+    when: { tool_glob: "*mail*", effect: external_comm }
+    budget: { scope: [run], count: true, limit: 20 }
+    then_exceeded: deny
+    reason: More than 20 emails in one run looks like a loop.

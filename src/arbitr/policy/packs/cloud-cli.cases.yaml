@@ -1,0 +1,140 @@
+cases:
+  - name: listing a bucket is allowed
+    tool: shell.run
+    args: { command: "aws s3 ls s3://team-assets" }
+    expect: allow
+  - name: deleting from a production bucket is denied
+    tool: shell.run
+    args: { command: "aws s3 rm s3://prod-assets/logo.png" }
+    expect: deny
+    expect_rule: cloud-cli.no-destroy-production
+  - name: deleting from a dev bucket needs approval
+    tool: shell.run
+    args: { command: "aws s3 rm s3://dev-assets/logo.png" }
+    expect: require_approval
+    expect_rule: cloud-cli.destructive-cloud
+  - name: terminating instances with the prod profile is denied
+    tool: shell.run
+    args: { command: "aws ec2 terminate-instances --instance-ids i-123 --profile prod" }
+    expect: deny
+  - name: terminating instances with the dev profile needs approval
+    tool: shell.run
+    args: { command: "aws ec2 terminate-instances --instance-ids i-123 --profile dev" }
+    expect: require_approval
+  - name: any command with the production profile needs approval
+    tool: shell.run
+    args: { command: "aws ec2 describe-instances --profile production" }
+    expect: require_approval
+    expect_rule: cloud-cli.production-changes
+  - name: terraform destroy is denied
+    tool: shell.run
+    args: { command: "terraform destroy" }
+    expect: deny
+    expect_rule: cloud-cli.no-iac-destroy
+  - name: terraform apply -destroy is denied
+    tool: shell.run
+    args: { command: "terraform apply -destroy -auto-approve" }
+    expect: deny
+  - name: terraform plan is allowed
+    tool: shell.run
+    args: { command: "terraform plan" }
+    expect: allow
+  - name: a destroy plan only reads, so it is allowed
+    tool: shell.run
+    args: { command: "terraform plan -destroy" }
+    expect: allow
+  - name: terraform apply is allowed
+    tool: shell.run
+    args: { command: "terraform apply -auto-approve" }
+    expect: allow
+  - name: removing state needs approval
+    tool: shell.run
+    args: { command: "terraform state rm aws_instance.web" }
+    expect: require_approval
+    expect_rule: cloud-cli.destructive-cli
+  - name: tofu destroy is denied
+    tool: shell.run
+    args: { command: "tofu destroy -auto-approve" }
+    expect: deny
+  - name: pulumi destroy is denied
+    tool: shell.run
+    args: { command: "pulumi destroy --yes" }
+    expect: deny
+  - name: terragrunt destroy is denied
+    tool: shell.run
+    args: { command: "terragrunt destroy" }
+    expect: deny
+  - name: a destroy inside sh -c is denied
+    tool: shell.run
+    args: { command: "sh -c 'cd infra && terraform destroy'" }
+    expect: deny
+  - name: deleting a gcloud instance needs approval
+    tool: shell.run
+    args: { command: "gcloud compute instances delete web-1 --zone us-east1-b" }
+    expect: require_approval
+    expect_rule: cloud-cli.destructive-cli
+  - name: listing gcloud instances is allowed
+    tool: shell.run
+    args: { command: "gcloud compute instances list" }
+    expect: allow
+  - name: removing a production storage bucket is denied
+    tool: shell.run
+    args: { command: "gsutil rm -r gs://prod-backups" }
+    expect: deny
+  - name: deleting an Azure resource group needs approval
+    tool: shell.run
+    args: { command: "az group delete --name rg-test --yes" }
+    expect: require_approval
+  - name: listing Azure VMs is allowed
+    tool: shell.run
+    args: { command: "az vm list" }
+    expect: allow
+  - name: a sync with delete to a production bucket is denied
+    tool: shell.run
+    args: { command: "aws s3 sync ./site s3://prod-site --delete" }
+    expect: deny
+  - name: uploading to a production bucket needs approval
+    tool: shell.run
+    args: { command: "aws s3 cp index.html s3://prod-site/index.html" }
+    expect: require_approval
+  - name: uploading to a dev bucket is allowed
+    tool: shell.run
+    args: { command: "aws s3 cp index.html s3://dev-site/index.html" }
+    expect: allow
+  - name: deleting a database instance needs approval
+    tool: shell.run
+    args: { command: "aws rds delete-db-instance --db-instance-identifier analytics" }
+    expect: require_approval
+  - name: deleting an IAM user in production is denied
+    tool: shell.run
+    args: { command: "aws iam delete-user --user-name bob --profile production" }
+    expect: deny
+  - name: checking the caller identity is allowed
+    tool: shell.run
+    args: { command: "aws sts get-caller-identity" }
+    expect: allow
+  - name: dropping a table with region before the service is denied in prod
+    tool: shell.run
+    args: { command: "aws --region us-east-1 --profile prod dynamodb delete-table --table-name t" }
+    expect: deny
+  - name: deleting a project needs approval
+    tool: shell.run
+    args: { command: "gcloud projects delete my-sandbox" }
+    expect: require_approval
+  - name: invoking a lambda is allowed
+    tool: shell.run
+    args: { command: "aws lambda invoke --function-name report out.json" }
+    expect: allow
+  - name: removing a production log bucket is denied
+    tool: shell.run
+    args: { command: "aws s3 rb s3://prod-logs --force" }
+    expect: deny
+  - name: echoing the words terraform destroy is harmless
+    tool: shell.run
+    args: { command: "echo terraform destroy" }
+    expect: allow
+  - name: a dedicated destroy tool is still caught by its command
+    tool: infra.run
+    effect: destructive
+    args: { command: "terraform destroy -target=aws_s3_bucket.logs" }
+    expect: deny

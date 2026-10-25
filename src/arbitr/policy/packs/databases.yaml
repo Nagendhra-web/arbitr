@@ -1,0 +1,27 @@
+# Databases: no destructive SQL on production, a human for production writes.
+# A database counts as production when its URL or name contains "prod".
+# Override databases.production to match your own naming.
+version: 1
+resources:
+  - id: databases.production
+    match: { kind: database, uri_glob: "*prod*" }
+    tags: [production, database]
+  - id: databases.any
+    match: { kind: database }
+    tags: [database]
+  - id: databases.tables
+    match: { kind: table }
+    tags: [sql-table]
+rules:
+  - id: databases.no-destroy-production
+    when: { effect: destructive, resource_tags_all: [production, database] }
+    then: deny
+    reason: Destructive SQL against a production database is not allowed.
+  - id: databases.production-writes
+    when: { effect: write, resource_tags_all: [production, database] }
+    then: require_approval
+    reason: Writes to a production database need a human.
+  - id: databases.destructive-sql
+    when: { effect: destructive, resource_tags_any: [sql-table, database] }
+    then: require_approval
+    reason: Destructive SQL needs a human.

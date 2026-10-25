@@ -1,0 +1,55 @@
+# Cloud CLIs and infrastructure as code: AWS, Google Cloud, Azure, Terraform,
+# OpenTofu and Pulumi. No infrastructure destroy from an agent, no destructive
+# changes to production, and a human for any other destructive cloud command.
+# Production: an AWS profile named prod or production, or a bucket URL with
+# "prod" in it.
+version: 1
+resources:
+  - id: cloud-cli.aws
+    match: { kind: aws }
+    tags: [cloud]
+  - id: cloud-cli.aws-prod
+    match: { kind: aws, attrs: { profile: prod } }
+    tags: [production, cloud]
+  - id: cloud-cli.aws-production
+    match: { kind: aws, attrs: { profile: production } }
+    tags: [production, cloud]
+  - id: cloud-cli.s3-prod
+    match: { kind: url, uri_glob: "s3://*prod*" }
+    tags: [production, cloud]
+  - id: cloud-cli.gcs-prod
+    match: { kind: url, uri_glob: "gs://*prod*" }
+    tags: [production, cloud]
+  - id: cloud-cli.s3
+    match: { kind: url, uri_glob: "s3://*" }
+    tags: [cloud]
+  - id: cloud-cli.gcs
+    match: { kind: url, uri_glob: "gs://*" }
+    tags: [cloud]
+rules:
+  - id: cloud-cli.no-iac-destroy
+    when:
+      effect: destructive
+      args:
+        - { path: "$.command", op: regex, value: "\\b(?:terraform|tofu|terragrunt|pulumi)\\b[^;|&]*\\bdestroy\\b" }
+    then: deny
+    reason: Destroying infrastructure with Terraform, OpenTofu or Pulumi is not allowed from an agent.
+  - id: cloud-cli.no-destroy-production
+    when: { effect: destructive, resource_tags_all: [production, cloud] }
+    then: deny
+    reason: Destructive commands against production cloud resources are not allowed.
+  - id: cloud-cli.destructive-cloud
+    when: { effect: destructive, resource_tags_any: [cloud] }
+    then: require_approval
+    reason: Destructive cloud commands need a human.
+  - id: cloud-cli.destructive-cli
+    when:
+      effect: destructive
+      args:
+        - { path: "$.command", op: regex, value: "\\b(?:aws|gcloud|gsutil|az|terraform|tofu|terragrunt|pulumi)\\b" }
+    then: require_approval
+    reason: Destructive cloud commands need a human.
+  - id: cloud-cli.production-changes
+    when: { effect_in: [write, external_comm], resource_tags_all: [production, cloud] }
+    then: require_approval
+    reason: Commands that touch production cloud resources need a human.

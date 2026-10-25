@@ -1,0 +1,137 @@
+cases:
+  - name: any command in a production namespace needs approval
+    tool: shell.run
+    args: { command: "kubectl get pods -n prod" }
+    expect: require_approval
+    expect_rule: kubernetes.production-changes
+  - name: deleting the prod namespace is denied
+    tool: shell.run
+    args: { command: "kubectl delete ns prod" }
+    expect: deny
+    expect_rule: kubernetes.no-delete-namespace
+  - name: deleting any namespace is denied
+    tool: shell.run
+    args: { command: "kubectl delete namespace staging" }
+    expect: deny
+  - name: deleting a pod in staging needs approval
+    tool: shell.run
+    args: { command: "kubectl delete pod web-1 -n staging" }
+    expect: require_approval
+    expect_rule: kubernetes.destructive
+  - name: deleting a pod in prod is denied
+    tool: shell.run
+    args: { command: "kubectl delete pod web-1 -n prod" }
+    expect: deny
+    expect_rule: kubernetes.no-destroy-production
+  - name: deleting in kube-system is denied
+    tool: shell.run
+    args: { command: "kubectl -n kube-system delete pod coredns-1" }
+    expect: deny
+    expect_rule: kubernetes.no-destroy-system
+  - name: applying in kube-system needs approval
+    tool: shell.run
+    args: { command: "kubectl apply -f app.yaml -n kube-system" }
+    expect: require_approval
+    expect_rule: kubernetes.system-changes
+  - name: applying in staging is allowed
+    tool: shell.run
+    args: { command: "kubectl apply -f app.yaml -n staging" }
+    expect: allow
+  - name: scaling in prod needs approval
+    tool: shell.run
+    args: { command: "kubectl scale deploy/web --replicas=0 -n prod" }
+    expect: require_approval
+  - name: a destructive exec in prod is denied
+    tool: shell.run
+    args: { command: "kubectl exec -it web-1 -n prod -- rm -rf /data" }
+    expect: deny
+  - name: a harmless exec in staging is allowed
+    tool: shell.run
+    args: { command: "kubectl exec -it web-1 -n staging -- ls /app" }
+    expect: allow
+  - name: deleting a deployment without a namespace needs approval
+    tool: shell.run
+    args: { command: "kubectl delete deploy/api" }
+    expect: require_approval
+  - name: a forced replace in prod is denied
+    tool: shell.run
+    args: { command: "kubectl replace --force -f web.yaml -n prod" }
+    expect: deny
+  - name: draining a node needs approval
+    tool: shell.run
+    args: { command: "kubectl drain node-1 --ignore-daemonsets" }
+    expect: require_approval
+    expect_rule: kubernetes.node-operations
+  - name: cordoning a node needs approval
+    tool: shell.run
+    args: { command: "kubectl cordon node-1" }
+    expect: require_approval
+  - name: uninstalling a helm release needs approval by default
+    tool: shell.run
+    args: { command: "helm uninstall web -n staging" }
+    expect: require_approval
+    expect_rule: default
+  - name: listing pods in the default namespace is allowed
+    tool: shell.run
+    args: { command: "kubectl get pods" }
+    expect: allow
+  - name: deleting all pods in staging needs approval
+    tool: shell.run
+    args: { command: "kubectl delete pods --all -n staging" }
+    expect: require_approval
+  - name: deleting all pods everywhere needs approval
+    tool: shell.run
+    args: { command: "kubectl delete pods --all -A" }
+    expect: require_approval
+  - name: deleting from a manifest in prod is denied
+    tool: shell.run
+    args: { command: "kubectl delete -f app.yaml -n prod" }
+    expect: deny
+  - name: deleting a service in production is denied
+    tool: shell.run
+    args: { command: "kubectl -n production delete svc/api" }
+    expect: deny
+  - name: switching context is allowed
+    tool: shell.run
+    args: { command: "kubectl config use-context dev-cluster" }
+    expect: allow
+  - name: rolling back in prod needs approval
+    tool: shell.run
+    args: { command: "kubectl rollout undo deploy/web -n prod" }
+    expect: require_approval
+  - name: reading prod logs needs approval with a shell tool
+    tool: shell.run
+    args: { command: "kubectl logs web-1 -n prod" }
+    expect: require_approval
+  - name: describing a staging pod is allowed
+    tool: shell.run
+    args: { command: "kubectl describe pod web-1 -n staging" }
+    expect: allow
+  - name: patching in staging is allowed
+    tool: shell.run
+    args: { command: "kubectl patch deploy web -n staging -p '{}'" }
+    expect: allow
+  - name: deleting kube-system itself is denied
+    tool: shell.run
+    args: { command: "kubectl delete ns kube-system" }
+    expect: deny
+  - name: labelling a node is allowed
+    tool: shell.run
+    args: { command: "kubectl label node n1 role=batch" }
+    expect: allow
+  - name: an apply that prunes needs approval
+    tool: shell.run
+    args: { command: "kubectl apply --prune -f manifests/ -n staging" }
+    expect: require_approval
+  - name: deleting a CRD needs approval
+    tool: shell.run
+    args: { command: "kubectl delete crd widgets.example.com" }
+    expect: require_approval
+  - name: creating a namespace is allowed
+    tool: shell.run
+    args: { command: "kubectl create ns preview-42" }
+    expect: allow
+  - name: a delete hidden in a chain is denied
+    tool: shell.run
+    args: { command: "kubectl get ns && kubectl delete ns staging" }
+    expect: deny

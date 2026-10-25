@@ -202,7 +202,7 @@ def test_ci_sh_uses_the_tested_library() -> None:
 
 
 def test_ci_sh_rechecks_the_tree_at_finish() -> None:
-    """A file edited during a run must turn the record dirty (review 2)."""
+    """A file edited during a run must turn the record dirty."""
     text = (SCRIPTS / "ci.sh").read_text(encoding="utf-8")
     finish = text[text.index("finish() {") :]
     assert "git status --porcelain" in finish

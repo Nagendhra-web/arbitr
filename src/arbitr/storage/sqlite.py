@@ -24,13 +24,14 @@ Example:
     >>> path = pathlib.Path(tempfile.mkdtemp()) / "ledger.db"
     >>> with SQLiteStorage.open(path, Redactor(b"k" * 32)) as db:
     ...     db.schema_version()
-    1
+    2
 """
 
 from __future__ import annotations
 
 import contextlib
 import json
+import math
 import random
 import sqlite3
 import time
@@ -40,9 +41,11 @@ from typing import TYPE_CHECKING, Final, Self
 
 from arbitr.core.audit import Event, VerifyResult, event_hash, genesis_hash, verify_chain
 from arbitr.core.canonical import canonical_json
-from arbitr.core.errors import StaleStateError, StorageError
+from arbitr.core.errors import ScopeError, StaleStateError, StorageError
 from arbitr.core.intent import new_ulid
+from arbitr.core.scope import Scope
 from arbitr.core.states import IntentState, can_transition, check_transition
+from arbitr.core.taint import Taint, merge
 from arbitr.storage.migrations import SQLITE, Migration
 
 if TYPE_CHECKING:
@@ -52,6 +55,7 @@ if TYPE_CHECKING:
 
     from arbitr.core.intent import ActionIntent
     from arbitr.core.redact import Redactor
+    from arbitr.policy.engine import BudgetCharge
 
 BUSY_TIMEOUT_MS: Final = 5000
 _NOW_SQL: Final = "SELECT strftime('%Y-%m-%dT%H:%M:%fZ', 'now')"
@@ -81,7 +85,13 @@ _TRANSITION_SQL: Final = (
     " AND (? IS NULL OR attempt = ?) AND (? IS NULL OR lease_owner = ?)"
 )
 _TRANSITION_KINDS: Final = frozenset(s.value.lower() for s in IntentState)
-_RESERVED_KINDS: Final = _TRANSITION_KINDS | {"run_started", "intent_created"}
+_RESERVED_KINDS: Final = _TRANSITION_KINDS | {
+    "run_started",
+    "intent_created",
+    "budget_reserved",
+    "budget_released",
+    "taint_added",
+}
 # What a new intent's updatable columns hold before any transition sets them.
 _COLUMN_DEFAULTS: Final[dict[str, object]] = {
     "decision": None,
@@ -103,6 +113,36 @@ _CHECKED_COLUMNS: Final = (
     "run_id",
     *_UPDATABLE_ORDER,
 )
+
+
+@dataclass(frozen=True)
+class RunRow:
+    """A run as stored. The task text in ``scope`` is redacted."""
+
+    run_id: str
+    principal: str
+    agent_id: str
+    parent_run_id: str | None
+    scopes: tuple[str, ...]
+    scope: Scope | None
+    taint: Taint
+    mode: str
+    created_at: str
+
+
+def _run_row(row: tuple[object, ...]) -> RunRow:
+    run_id, principal, agent_id, parent, scopes, scope, taint, mode, created = row
+    return RunRow(
+        run_id=str(run_id),
+        principal=str(principal),
+        agent_id=str(agent_id),
+        parent_run_id=None if parent is None else str(parent),
+        scopes=tuple(json.loads(str(scopes))),
+        scope=Scope.model_validate(json.loads(str(scope))) if scope else None,
+        taint=Taint.from_dict(json.loads(str(taint))),
+        mode=str(mode),
+        created_at=str(created),
+    )
 
 
 @dataclass(frozen=True)
@@ -195,6 +235,80 @@ class Transaction:
             raise StorageError("event insert returned no row id")
         return Event(seq, intent_id, run_id, kind, body, prev, digest, self.now)
 
+    # ------------------------------------------------------------ budgets
+
+    def budget_counters(self, keys: Sequence[str]) -> dict[str, float]:
+        """Current value of each budget counter; unknown keys read as 0."""
+        conn = self._live()
+        out = dict.fromkeys(keys, 0.0)
+        for key in keys:
+            row = conn.execute(
+                "SELECT value FROM budget_counters WHERE scope_key = ?", (key,)
+            ).fetchone()
+            if row is not None:
+                out[key] = float(row[0])
+        return out
+
+    def reserve_budget(self, key: str, amount: float, limit: float) -> bool:
+        """Add ``amount`` to a counter only if it stays within ``limit``.
+
+        Atomic: the check and the add are one statement inside this write
+        transaction, so concurrent reservations can never overspend. Returns
+        False, changing nothing, when the reservation would exceed the limit.
+        """
+        conn = self._live()
+        _check_amount(amount)
+        _check_amount(limit)
+        conn.execute(
+            "INSERT OR IGNORE INTO budget_counters (scope_key, value, updated_at) VALUES (?, 0, ?)",
+            (key, self.now),
+        )
+        cur = conn.execute(
+            "UPDATE budget_counters SET value = value + ?, updated_at = ?"
+            " WHERE scope_key = ? AND value + ? <= ?",
+            (amount, self.now, key, amount, limit),
+        )
+        if cur.rowcount != 1:
+            return False
+        self._append("budget_reserved", {"scope_key": key, "amount": amount, "limit": limit})
+        return True
+
+    def release_budget(self, key: str, amount: float) -> None:
+        """Return ``amount`` to a counter, for an action that did not run.
+
+        Raises:
+            StorageError: more than is reserved would be released.
+        """
+        conn = self._live()
+        _check_amount(amount)
+        cur = conn.execute(
+            "UPDATE budget_counters SET value = value - ?, updated_at = ?"
+            " WHERE scope_key = ? AND value >= ?",
+            (amount, self.now, key, amount),
+        )
+        if cur.rowcount != 1:
+            raise StorageError(f"cannot release more than is reserved on budget {key}")
+        self._append("budget_released", {"scope_key": key, "amount": amount})
+
+    def reserve_all(self, charges: Sequence[BudgetCharge]) -> bool:
+        """Reserve every charge, or none of them. Returns whether they were reserved."""
+        self._live()
+        totals: dict[str, float] = {}
+        limits: dict[str, float] = {}
+        for charge in charges:
+            _check_amount(charge.amount)
+            totals[charge.scope_key] = totals.get(charge.scope_key, 0.0) + charge.amount
+            limits[charge.scope_key] = min(limits.get(charge.scope_key, charge.limit), charge.limit)
+        current = self.budget_counters(list(totals))
+        if any(current[k] + totals[k] > limits[k] for k in totals):
+            return False
+        for charge in charges:
+            if not self.reserve_budget(charge.scope_key, charge.amount, charge.limit):
+                raise StorageError(  # pragma: no cover, checked above inside this transaction
+                    f"budget {charge.scope_key} changed inside its own transaction"
+                )
+        return True
+
     # ------------------------------------------------------------ runs
 
     def insert_run(  # noqa: PLR0913, a run has this many independent attributes
@@ -206,23 +320,60 @@ class Transaction:
         mode: str = "enforce",
         parent_run_id: str | None = None,
         scopes: Sequence[str] = (),
+        scope: Scope | None = None,
         metadata: Mapping[str, object] | None = None,
     ) -> None:
-        """Record a new run and its ``run_started`` event."""
+        """Record a new run and its ``run_started`` event.
+
+        A child run starts with its parent's taint, inherits its parent's scope
+        when it declares none, and may not be wider than its parent in either
+        its named scopes or its scope manifest. The task text is redacted.
+
+        A child of an enforcing run cannot run in shadow mode: that would loosen
+        its parent the same way a wider scope would.
+
+        Raises:
+            ScopeError: the child would be wider than its parent.
+            StorageError: the parent run does not exist, or the mode is unknown.
+        """
         conn = self._live()
+        if mode not in ("enforce", "shadow"):
+            raise StorageError(f"run mode must be enforce or shadow, not {mode!r}")
+        taint = Taint()
+        if parent_run_id is not None:
+            parent = self.get_run(parent_run_id)
+            if parent is None:
+                raise StorageError(f"parent run {parent_run_id} does not exist")
+            if parent.mode == "enforce" and mode == "shadow":
+                raise ScopeError("a child of an enforcing run cannot run in shadow mode")
+            if not set(scopes) <= set(parent.scopes):
+                raise ScopeError(
+                    f"child run scopes {sorted(set(scopes) - set(parent.scopes))} are not"
+                    " held by its parent"
+                )
+            if scope is None:
+                scope = parent.scope
+            elif parent.scope is not None and not scope.is_within(parent.scope):
+                raise ScopeError("child run scope is wider than its parent's scope")
+            taint = parent.taint
+        if scope is not None and scope.task is not None:
+            scope = scope.model_copy(update={"task": self._redactor.redact_text(scope.task)})
+        scope_json = canonical_json(scope.model_dump(mode="json")) if scope else None
         meta = canonical_json(self._redactor.redact(dict(metadata or {})))
         conn.execute(
-            "INSERT INTO runs (run_id, principal, agent_id, parent_run_id, scopes, mode,"
-            " created_at, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO runs (run_id, principal, agent_id, parent_run_id, scopes, taint, mode,"
+            " created_at, metadata, scope) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 run_id,
                 principal,
                 agent_id,
                 parent_run_id,
-                canonical_json(list(scopes)),
+                canonical_json(sorted(set(scopes))),
+                canonical_json(taint.to_dict()),
                 mode,
                 self.now,
                 meta,
+                scope_json,
             ),
         )
         self._append(
@@ -232,9 +383,58 @@ class Transaction:
                 "agent_id": agent_id,
                 "mode": mode,
                 "parent_run_id": parent_run_id,
+                "scopes": sorted(set(scopes)),
+                "scope": scope.model_dump(mode="json") if scope else None,
+                "taint": taint.to_dict(),
             },
             run_id=run_id,
         )
+
+    def get_run(self, run_id: str) -> RunRow | None:
+        """Return a run, or None."""
+        row = (
+            self._live()
+            .execute(
+                "SELECT run_id, principal, agent_id, parent_run_id, scopes, scope, taint, mode,"
+                " created_at FROM runs WHERE run_id = ?",
+                (run_id,),
+            )
+            .fetchone()
+        )
+        return _run_row(row) if row else None
+
+    def add_taint(self, run_id: str, taint: Taint) -> None:
+        """Taint a run, every run below it and every run above it. Taint never decreases.
+
+        Upward because a sub-agent's output flows back into its parent's
+        context: otherwise untrusted input read by a child and private data read
+        by the parent would never meet. Siblings are not touched; they get the
+        parent's taint only when they start after it.
+
+        Each run whose taint changes gets a ``taint_added`` event.
+        """
+        conn = self._live()
+        tree = conn.execute(
+            "WITH RECURSIVE"
+            " down(id) AS (SELECT ? UNION SELECT r.run_id FROM runs r"
+            " JOIN down d ON r.parent_run_id = d.id),"
+            " up(id) AS (SELECT ? UNION SELECT r.parent_run_id FROM runs r"
+            " JOIN up u ON r.run_id = u.id WHERE r.parent_run_id IS NOT NULL)"
+            " SELECT id FROM down UNION SELECT id FROM up ORDER BY id",
+            (run_id, run_id),
+        ).fetchall()
+        for (rid,) in tree:
+            current = self.get_run(rid)
+            if current is None:
+                raise StorageError(f"run {rid} does not exist")
+            merged = merge(current.taint, taint)
+            if merged == current.taint:
+                continue
+            conn.execute(
+                "UPDATE runs SET taint = ? WHERE run_id = ?",
+                (canonical_json(merged.to_dict()), rid),
+            )
+            self._append("taint_added", {"taint": merged.to_dict()}, run_id=rid)
 
     # ------------------------------------------------------------ intents
 
@@ -384,6 +584,11 @@ def _fetch_intent(conn: sqlite3.Connection, column: str, value: str) -> IntentRo
     data = dict(zip([d[0] for d in cur.description], row, strict=True))
     data["state"] = IntentState(data["state"])
     return IntentRow(**data)
+
+
+def _check_amount(value: float) -> None:
+    if isinstance(value, bool) or not math.isfinite(value) or value <= 0:
+        raise StorageError(f"budget amount must be a positive finite number, not {value!r}")
 
 
 def _is_busy(exc: sqlite3.Error) -> bool:
@@ -611,10 +816,62 @@ class SQLiteStorage:
         chain = verify_chain(self.events(), self._genesis)
         if not chain.ok:
             return chain
-        problem = self._check_intents()
+        problem = self._check_intents() or self._check_budgets() or self._check_runs()
         if problem:
             return VerifyResult(ok=False, checked=chain.checked, reason=problem)
         return chain
+
+    def _check_runs(self) -> str | None:
+        """Every run row must match its run_started event and its latest taint."""
+        expected: dict[str, dict[str, object]] = {}
+        for event in self.events():
+            if event.run_id is None:
+                continue
+            payload = json.loads(event.payload)
+            if event.kind == "run_started":
+                expected[event.run_id] = {
+                    "principal": payload.get("principal"),
+                    "agent_id": payload.get("agent_id"),
+                    "mode": payload.get("mode"),
+                    "parent_run_id": payload.get("parent_run_id"),
+                    "scopes": canonical_json(payload.get("scopes") or []),
+                    "scope": canonical_json(payload["scope"]) if payload.get("scope") else None,
+                    "taint": canonical_json(payload.get("taint") or Taint().to_dict()),
+                }
+            elif event.kind == "taint_added" and event.run_id in expected:
+                expected[event.run_id]["taint"] = canonical_json(payload.get("taint"))
+        cur = self._conn.execute(
+            "SELECT run_id, principal, agent_id, mode, parent_run_id, scopes, scope, taint"
+            " FROM runs"
+        )
+        names = ["principal", "agent_id", "mode", "parent_run_id", "scopes", "scope", "taint"]
+        for run_id, *values in cur:
+            facts = expected.pop(run_id, None)
+            if facts is None:
+                return f"run {run_id} has no run_started event"
+            for name, value in zip(names, values, strict=True):
+                if value != facts[name]:
+                    return f"run {run_id} {name} does not match its recorded events"
+        if expected:
+            return f"run {sorted(expected)[0]} has events but its record is missing"
+        return None
+
+    def _check_budgets(self) -> str | None:
+        """Every budget counter must equal its reservations minus its releases."""
+        expected: dict[str, float] = {}
+        for event in self.events():
+            if event.kind in {"budget_reserved", "budget_released"}:
+                payload = json.loads(event.payload)
+                sign = 1.0 if event.kind == "budget_reserved" else -1.0
+                key = str(payload["scope_key"])
+                expected[key] = expected.get(key, 0.0) + sign * float(payload["amount"])
+        for key, value in self._conn.execute("SELECT scope_key, value FROM budget_counters"):
+            if not math.isclose(float(value), expected.pop(key, 0.0), abs_tol=1e-9):
+                return f"budget counter {key} does not match its recorded reservations"
+        for key, value in expected.items():
+            if not math.isclose(value, 0.0, abs_tol=1e-9):
+                return f"budget counter {key} is missing but has recorded reservations"
+        return None
 
     def _check_intents(self) -> str | None:
         expected, problem = self._replay_intent_events()

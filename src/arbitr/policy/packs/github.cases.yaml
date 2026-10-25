@@ -1,0 +1,198 @@
+cases:
+  - name: listing pull requests is allowed
+    tool: shell.run
+    args: { command: "gh pr list" }
+    expect: allow
+  - name: deleting a repository with gh is denied
+    tool: shell.run
+    args: { command: "gh repo delete octo/app --yes" }
+    expect: deny
+    expect_rule: github.no-repo-delete-cli
+  - name: deleting a repository with a tool is denied
+    tool: github.delete_repo
+    effect: destructive
+    args: { owner: "octo", repo: "app" }
+    expect: deny
+    expect_rule: github.no-repo-delete-tool
+  - name: deleting a repository through an MCP tool is denied
+    tool: mcp__github__delete_repository
+    effect: destructive
+    args: { owner: "octo", repo: "app" }
+    expect: deny
+  - name: editing a workflow needs approval
+    tool: fs.write
+    args: { path: "repo/.github/workflows/ci.yml" }
+    expect: require_approval
+    expect_rule: github.ci-config-changes
+  - name: editing an absolute workflow path needs approval
+    tool: fs.write
+    args: { path: "/srv/app/.github/workflows/release.yml" }
+    expect: require_approval
+  - name: deleting the workflows folder needs approval
+    tool: shell.run
+    args: { command: "rm -rf .github/workflows" }
+    expect: require_approval
+  - name: reading a workflow is allowed
+    tool: fs.read
+    effect: read
+    args: { path: "repo/.github/workflows/ci.yml" }
+    expect: allow
+  - name: editing other files is allowed
+    tool: fs.write
+    args: { path: "repo/src/app.py" }
+    expect: allow
+  - name: making a repository public with gh needs approval
+    tool: shell.run
+    args: { command: "gh repo edit octo/app --visibility public" }
+    expect: require_approval
+    expect_rule: github.visibility-cli
+  - name: making a repository public with a tool needs approval
+    tool: github.update_repo
+    args: { owner: "octo", repo: "app", private: false }
+    expect: require_approval
+    expect_rule: github.made-public
+  - name: setting visibility to public with a tool needs approval
+    tool: github.update_repo
+    args: { owner: "octo", repo: "app", visibility: "public" }
+    expect: require_approval
+    expect_rule: github.visibility-tool
+  - name: changing a description is allowed
+    tool: github.update_repo
+    args: { owner: "octo", repo: "app", description: "Payments service" }
+    expect: allow
+  - name: setting a repository secret needs approval
+    tool: shell.run
+    args: { command: "gh secret set DEPLOY_KEY --body x" }
+    expect: require_approval
+    expect_rule: github.secret-settings
+  - name: deleting a repository secret needs approval
+    tool: shell.run
+    args: { command: "gh secret delete DEPLOY_KEY" }
+    expect: require_approval
+  - name: listing secrets is allowed
+    tool: shell.run
+    args: { command: "gh secret list" }
+    expect: allow
+  - name: deleting a release needs approval
+    tool: shell.run
+    args: { command: "gh release delete v1.0 --yes" }
+    expect: require_approval
+  - name: creating a release is allowed
+    tool: shell.run
+    args: { command: "gh release create v1.1 --notes 'Fixes'" }
+    expect: allow
+  - name: a comment with a token is denied
+    tool: github.create_issue_comment
+    effect: external_comm
+    args: { repo: "octo/app", issue: 12, body: "try ghp_a1B2c3D4e5a1B2c3D4e5a1B2c3D4e5a1B2c3D4e5" }  # gitleaks:allow (fake secret for the DLP test)
+    expect: deny
+    expect_rule: github.no-secrets-in-comments
+  - name: a normal comment is allowed
+    tool: github.create_issue_comment
+    effect: external_comm
+    args: { repo: "octo/app", issue: 12, body: "Fixed in #482." }
+    expect: allow
+  - name: a pull request body with a token is denied
+    tool: github.create_pull_request
+    effect: external_comm
+    args: { repo: "octo/app", title: "Fix", body: "env ghp_a1B2c3D4e5a1B2c3D4e5a1B2c3D4e5a1B2c3D4e5" }  # gitleaks:allow (fake secret for the DLP test)
+    expect: deny
+  - name: merging a pull request is allowed
+    tool: shell.run
+    args: { command: "gh pr merge 12 --squash" }
+    expect: allow
+  - name: an API delete needs approval by default
+    tool: shell.run
+    args: { command: "gh api -X DELETE repos/octo/app/branches/old/protection" }
+    expect: require_approval
+    expect_rule: default
+  - name: an API read is allowed
+    tool: shell.run
+    args: { command: "gh api repos/octo/app" }
+    expect: allow
+  - name: a repository delete hidden in a chain is denied
+    tool: shell.run
+    args: { command: "gh auth status && gh repo delete octo/app --yes" }
+    expect: deny
+  - name: viewing a repository is allowed
+    tool: shell.run
+    args: { command: "gh repo view octo/app" }
+    expect: allow
+  - name: running a workflow is allowed
+    tool: shell.run
+    args: { command: "gh workflow run deploy.yml" }
+    expect: allow
+  - name: closing an issue is allowed
+    tool: github.update_issue
+    args: { repo: "octo/app", issue: 12, state: "closed" }
+    expect: allow
+  - name: a workflow change through git add needs approval
+    tool: fs.write
+    args: { path: ".github/workflows/ci.yml" }
+    expect: require_approval
+  - name: a dependabot config change is allowed
+    tool: fs.write
+    args: { path: ".github/dependabot.yml" }
+    expect: allow
+  - name: deleting a repository through gh api is denied
+    tool: shell.run
+    args: { command: "gh api -X DELETE repos/octo/app" }
+    expect: deny
+    expect_rule: github.no-repo-delete-api
+  - name: deleting a repository through gh api with a lower-case method is denied
+    tool: shell.run
+    args: { command: "gh api repos/octo/app --method delete" }
+    expect: deny
+  - name: deleting a repository with an attached method is denied
+    tool: shell.run
+    args: { command: "gh api -XDELETE repos/octo/app" }
+    expect: deny
+  - name: deleting a repository with method equals delete is denied
+    tool: shell.run
+    args: { command: "gh api --method=DELETE repos/octo/app" }
+    expect: deny
+  - name: a repository named delete is not a delete
+    tool: shell.run
+    args: { command: "gh api repos/octo/delete" }
+    expect: allow
+  - name: setting a secret with an attached method needs approval
+    tool: shell.run
+    args: { command: "gh api -XPUT repos/octo/app/actions/secrets/K -f encrypted_value=x" }
+    expect: require_approval
+  - name: setting a secret through gh api needs approval
+    tool: shell.run
+    args: { command: "gh api -X PUT repos/octo/app/actions/secrets/DEPLOY_KEY -f encrypted_value=x" }
+    expect: require_approval
+    expect_rule: github.secret-settings-api
+  - name: making a repository public through gh api needs approval
+    tool: shell.run
+    args: { command: "gh api -X PATCH repos/octo/app -f private=false" }
+    expect: require_approval
+    expect_rule: github.visibility-api
+  - name: a repository delete tool with another naming is denied
+    tool: github.repos.delete
+    effect: destructive
+    args: { owner: "octo", repo: "app" }
+    expect: deny
+  - name: a shadow run cannot loosen this pack
+    tool: shell.run
+    mode: shadow
+    args: { command: "gh repo delete octo/app --yes" }
+    expect: deny
+  - name: a bundled flag group with the method is still a delete
+    tool: shell.run
+    args: { command: "gh api -iXDELETE repos/octo/app" }
+    expect: deny
+  - name: a separate method after a bundled flag group is still a delete
+    tool: shell.run
+    args: { command: "gh api -iX DELETE /repos/octo/app" }
+    expect: deny
+  - name: deleting a branch protection is not a repository delete
+    tool: shell.run
+    args: { command: "gh api -X DELETE repos/octo/app/branches/main/protection" }
+    expect: require_approval
+    expect_rule: default
+  - name: setting an organization secret needs approval
+    tool: shell.run
+    args: { command: "gh api --method PUT orgs/octo/actions/secrets/TOKEN -f encrypted_value=x" }
+    expect: require_approval
