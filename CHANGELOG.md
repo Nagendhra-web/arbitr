@@ -8,12 +8,31 @@ All notable changes to this project are recorded here. The format follows
 
 ### Added
 
+- Core ledger:
+  - Canonical JSON (RFC 8785), tested against the RFC's published vectors.
+    Large integers are accepted only when they survive the round trip exactly,
+    so two different arguments can never share a hash.
+  - Action intents built from a private snapshot of the arguments, with an
+    intent hash and an idempotency key; tool specifications.
+  - An explicit intent state machine, checked against its TLA+ model.
+  - SQLite storage: WAL with full sync, versioned forward-only migrations, safe
+    concurrent opening, and compare-and-set state changes fenced on the attempt
+    number and lease owner. Every storage failure is reported as a
+    `StorageError`, so callers can fail closed.
+  - A tamper-evident audit chain covering each event and the intent and run it
+    belongs to. `verify` reports the first broken link and checks every intent
+    record against its events. JSON lines export.
+  - Redaction inside storage with keyed markers: fields named like secrets in
+    any spelling (`password`, `clientSecret`, `Proxy-Authorization`, ...),
+    tool-specific paths, API keys and tokens, private keys, JWTs, `Bearer` and
+    `Basic` credentials, passwords in URLs, and card numbers as text or as
+    integers. A secret with no recognizable shape and no label in free text
+    cannot be detected; put secrets in named fields.
 - Repository scaffold, packaging with optional extras, local CI pipeline
   (`make ci`, `make ci-fast`, `make ci-docker`, `make act`), pinned CI Docker
   image, Postgres compose file for tests, git hooks that enforce owner
   authorship, commit message rules and push approval, manual-only GitHub
-  workflows, TLA+ and deterministic simulation skeletons, senior engineer
-  review agent and `/autopilot` command.
+  workflows, and TLA+ and deterministic simulation skeletons.
 
 ### Fixed
 
