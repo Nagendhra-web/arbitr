@@ -33,6 +33,25 @@ rules:
       resource_count_gt: { kind: email, value: 50 }
     then: require_approval
     reason: Messages to more than 50 recipients need a human.
+  # Backstops that do not depend on recipient extraction (custom extractors).
+  - id: email-and-messaging.many-to-list
+    when:
+      effect: external_comm
+      args: [{ path: "$.to[50]", op: exists }]
+    then: require_approval
+    reason: Messages to more than 50 recipients need a human.
+  - id: email-and-messaging.many-cc-list
+    when:
+      effect: external_comm
+      args: [{ path: "$.cc[50]", op: exists }]
+    then: require_approval
+    reason: Messages to more than 50 recipients need a human.
+  - id: email-and-messaging.many-bcc-list
+    when:
+      effect: external_comm
+      args: [{ path: "$.bcc[50]", op: exists }]
+    then: require_approval
+    reason: Messages to more than 50 recipients need a human.
   - id: email-and-messaging.mass-email
     when: { tool_glob: "*mail*", effect: external_comm }
     budget: { scope: [run], count: true, limit: 20 }

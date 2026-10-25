@@ -200,13 +200,20 @@ def _scope_spend_key(run_id: str) -> str:
     return f"scope-spend|run:{run_id}"
 
 
-def _spend_amount(intent: ActionIntent) -> float | None:
-    amount = intent.args.get("amount")
-    if intent.effect != "financial" or isinstance(amount, bool):
-        return None
-    if not isinstance(amount, int | float) or not math.isfinite(amount) or amount <= 0:
+def _measured(amount: object) -> float | None:
+    """A spend amount as a number, or None when it is not one (a bool is not)."""
+    if isinstance(amount, bool) or not isinstance(amount, int | float):
         return None
     return float(amount)
+
+
+def _spend_amount(intent: ActionIntent) -> float | None:
+    amount = _measured(intent.args.get("amount"))
+    if intent.effect != "financial" or amount is None:
+        return None
+    if not math.isfinite(amount) or amount <= 0:
+        return None
+    return amount
 
 
 def _scope_charges(tx: Transaction, run_id: str, intent: ActionIntent) -> tuple[BudgetCharge, ...]:
@@ -270,6 +277,7 @@ def _may_have_acted(tx: Transaction, spec: ToolSpec, row: IntentRow) -> bool:
 _NO_DELAY: Final = (
     "The arguments contain redacted values, so the action needs approval instead of a delay."
 )
+_NO_WINDOW: Final = "This retry never had its cancel window, so it needs approval instead."
 
 
 class Ledger:
@@ -544,7 +552,7 @@ class Ledger:
                 tool=intent.tool,
                 effect=intent.effect,
                 resources=resources,
-                amount=float(amount) if isinstance(amount, int | float) else None,
+                amount=_measured(amount),  # the same measure that is charged
                 spent=_Counters(tx).get(_scope_spend_key(run.run_id), 0.0),
             )
             outside = verdict.outside
@@ -621,10 +629,17 @@ class Ledger:
         """A delay needs the real arguments stored, or the scheduler could not run it.
 
         When redaction changed the arguments, ask for approval instead (stricter).
-        A retry after FAILED already waited out its window once, so it runs now.
+        A retry after FAILED runs now only if it already waited out a window;
+        one that never did (the delay rule came later) needs approval, because
+        a failed action cannot go back to SCHEDULED.
         """
         if state != S.PROPOSED:
-            return dataclasses.replace(decision, outcome="allow", delay_seconds=0.0)
+            if tx.has_been(intent.intent_id, S.SCHEDULED):
+                return dataclasses.replace(decision, outcome="allow", delay_seconds=0.0)
+            return dataclasses.replace(
+                decision, outcome="require_approval", delay_seconds=0.0,
+                reason=f"{decision.reason} {_NO_WINDOW}",
+            )  # fmt: skip
         row = tx.get_intent(intent.intent_id)
         if row is not None and row.args_exact:
             return decision

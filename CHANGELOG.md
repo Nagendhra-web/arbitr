@@ -109,6 +109,12 @@ All notable changes to this project are recorded here. The format follows
 
 ### Fixed
 
+- A spend amount given as true or false is outside a run's spend limit
+  instead of being checked as 1 and never charged.
+- A retried action that never had its cancel window needs approval instead of
+  running at once.
+- The messaging pack also limits recipient lists of more than 50 directly, so
+  tools with their own resource extractor are covered.
 - `gh api` paths are decoded and normalized before policy matching, so
   doubled, trailing or encoded slashes and dot segments no longer slip past
   path rules.
