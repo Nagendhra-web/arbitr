@@ -1,4 +1,4 @@
-"""Credential providers: environment, owner-only files and chains."""
+"""Credential providers: environment, owner-only files, the OS keyring and chains."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import os
 import sys
 from typing import TYPE_CHECKING
 
+import keyring.core
 import pytest
 
 from arbitr.credentials import (
@@ -13,7 +14,9 @@ from arbitr.credentials import (
     CredentialError,
     EnvCredentials,
     FileCredentials,
+    KeyringCredentials,
 )
+from fake_keyring import FakeKeyring
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -80,3 +83,50 @@ def test_a_chain_uses_the_first_provider_that_has_it(tmp_path: Path) -> None:
     assert chain.get("other") == "o"
     with pytest.raises(CredentialError, match="any provider"):
         chain.get("nowhere")
+
+
+@pytest.fixture
+def fake_keyring(monkeypatch: pytest.MonkeyPatch) -> FakeKeyring:
+    backend = FakeKeyring({("arbitr", "stripe_live"): "sk_keyring"})
+    monkeypatch.setattr(keyring.core, "_keyring_backend", backend)
+    return backend
+
+
+def test_a_keyring_credential_is_read_from_the_service(fake_keyring: FakeKeyring) -> None:
+    assert KeyringCredentials("arbitr").get("stripe_live") == "sk_keyring"
+
+
+def test_a_missing_keyring_entry_is_an_error(fake_keyring: FakeKeyring) -> None:
+    with pytest.raises(CredentialError, match="not in the keyring service arbitr"):
+        KeyringCredentials("arbitr").get("absent")
+    fake_keyring.entries[("arbitr", "blank")] = ""
+    with pytest.raises(CredentialError, match="not in the keyring"):
+        KeyringCredentials("arbitr").get("blank")
+
+
+def test_a_keyring_backend_failure_is_an_error(fake_keyring: FakeKeyring) -> None:
+    fake_keyring.fail = True
+    with pytest.raises(CredentialError, match="cannot be read from the keyring") as exc:
+        KeyringCredentials("arbitr").get("stripe_live")
+    assert "sk_keyring" not in str(exc.value)
+
+
+def test_a_keyring_name_is_checked(fake_keyring: FakeKeyring) -> None:
+    with pytest.raises(CredentialError, match="invalid credential name"):
+        KeyringCredentials("arbitr").get("../x")
+
+
+def test_a_keyring_service_cannot_be_blank() -> None:
+    with pytest.raises(CredentialError, match="keyring service"):
+        KeyringCredentials("  ")
+
+
+def test_a_missing_keyring_package_gives_the_install_hint(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(sys.modules, "keyring", None)
+    with pytest.raises(CredentialError, match=r'pip install "arbitr\[keyring\]"'):
+        KeyringCredentials("arbitr").get("stripe_live")
+
+
+def test_a_chain_falls_through_to_the_keyring(fake_keyring: FakeKeyring) -> None:
+    chain = ChainCredentials([EnvCredentials(environ={}), KeyringCredentials("arbitr")])
+    assert chain.get("stripe_live") == "sk_keyring"

@@ -84,6 +84,12 @@ class RunContextError(ArbitrError, RuntimeError):
     code: ClassVar[str] = "no_run"
 
 
+class ApprovalError(ArbitrError, ValueError):
+    """An approval vote or link was refused: wrong intent, expired, decided, or not allowed."""
+
+    code = "approval_error"
+
+
 class ActionError(ArbitrError):
     """An action did not run (or its outcome is not known). Agents get ``to_tool_message()``."""
 

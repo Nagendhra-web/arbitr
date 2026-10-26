@@ -10,6 +10,8 @@ Providers:
 - ``EnvCredentials``: ``ARBITR_CRED_<NAME>`` environment variables.
 - ``FileCredentials``: one file per credential in a folder that only the
   owner can read. On POSIX systems a file readable by other users is refused.
+- ``KeyringCredentials``: entries in the OS keyring under one service name.
+  Needs the ``keyring`` extra (``pip install "arbitr[keyring]"``).
 - ``ChainCredentials``: tries several providers in order.
 
 Example:
@@ -94,6 +96,48 @@ class FileCredentials:
             raise CredentialError(f"credential {name} cannot be read") from exc
         if not value:
             raise CredentialError(f"credential {name} is empty")
+        return value
+
+
+KEYRING_HINT: Final = (
+    'The keyring provider needs the "keyring" extra: pip install "arbitr[keyring]"'
+)
+
+
+class KeyringCredentials:
+    """Credentials from the OS keyring: the entry ``(service, name)`` holds the value."""
+
+    def __init__(self, service: str) -> None:
+        """Read entries stored under ``service``.
+
+        Raises:
+            CredentialError: the service name is blank.
+        """
+        if not service.strip():
+            raise CredentialError("a keyring service name cannot be blank")
+        self.service = service
+
+    def get(self, name: str) -> str:
+        """The keyring entry for ``name``.
+
+        Raises:
+            CredentialError: the keyring package is not installed, the backend
+                fails, or there is no entry.
+        """
+        _check_name(name)
+        try:
+            import keyring  # noqa: PLC0415 - optional extra, imported only when used
+            from keyring.errors import KeyringError  # noqa: PLC0415
+        except ImportError:
+            raise CredentialError(KEYRING_HINT) from None
+        try:
+            value = keyring.get_password(self.service, name)
+        except KeyringError as exc:
+            raise CredentialError(
+                f"credential {name} cannot be read from the keyring ({type(exc).__name__})"
+            ) from None
+        if not value:
+            raise CredentialError(f"credential {name} is not in the keyring service {self.service}")
         return value
 
 

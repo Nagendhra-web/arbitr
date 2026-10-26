@@ -1,14 +1,76 @@
 {
   "$defs": {
+    "ApprovalRequirement": {
+      "additionalProperties": false,
+      "description": "Who must approve: how many distinct people, from which roles.",
+      "properties": {
+        "required": {
+          "default": 1,
+          "maximum": 10,
+          "minimum": 1,
+          "title": "Required",
+          "type": "integer"
+        },
+        "roles": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Roles"
+        },
+        "separate_from_principal": {
+          "default": false,
+          "title": "Separate From Principal",
+          "type": "boolean"
+        }
+      },
+      "title": "ApprovalRequirement",
+      "type": "object"
+    },
     "ApprovalSettings": {
       "additionalProperties": false,
-      "description": "How approvals behave.",
+      "description": "How approvals behave, and who must approve when a rule does not say.",
       "properties": {
         "expires_after": {
           "default": "PT15M",
           "format": "duration",
           "title": "Expires After",
           "type": "string"
+        },
+        "required": {
+          "default": 1,
+          "maximum": 10,
+          "minimum": 1,
+          "title": "Required",
+          "type": "integer"
+        },
+        "roles": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Roles"
+        },
+        "separate_from_principal": {
+          "default": false,
+          "title": "Separate From Principal",
+          "type": "boolean"
         },
         "wait_seconds": {
           "default": 0,
@@ -280,6 +342,17 @@
           "title": "Always Enforce",
           "type": "boolean"
         },
+        "approvals": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ApprovalRequirement"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "budget": {
           "anyOf": [
             {
@@ -511,6 +584,21 @@
           "default": null,
           "title": "Outside Scope"
         },
+        "preview": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/ArgCondition"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Preview"
+        },
         "principal_in": {
           "anyOf": [
             {
@@ -674,6 +762,9 @@
       "$ref": "#/$defs/ApprovalSettings",
       "default": {
         "expires_after": "PT15M",
+        "required": 1,
+        "roles": null,
+        "separate_from_principal": false,
         "wait_seconds": 0
       }
     },

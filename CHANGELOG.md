@@ -101,6 +101,59 @@ All notable changes to this project are recorded here. The format follows
   - A rule condition, `resource_count_gt`, that counts distinct resources of
     one kind; the messaging pack uses it to count recipients across to, cc and
     bcc.
+- Configuration:
+  - `arbitr.yaml` with the ledger, policy and key file paths, worker id, lease
+    and approval durations, credential providers and approval URLs. Relative
+    paths resolve against the file's folder. `ARBITR_CONFIG`, `ARBITR_LEDGER`,
+    `ARBITR_POLICY`, `ARBITR_KEY_FILE` and `ARBITR_LEDGER_KEY` override it;
+    environment beats file beats defaults. Errors name the file and the field.
+  - `load_config()` and `Config.open_ledger()` build the ledger with its
+    policy, key and credential chain. The key must be at least 32 bytes, never
+    goes in the config file, and a key file other users can read is refused
+    on POSIX.
+  - `arbitr init` writes a config, a starter policy with the packs you name,
+    an owner-only random key and the ledger, adds `.arbitr/` to `.gitignore`,
+    and refuses to overwrite without `--force`. `arbitr config check`
+    validates everything without running anything and lists the problems.
+  - `KeyringCredentials` reads credentials from the OS keyring (the new
+    `keyring` extra).
+- Approvals:
+  - An approval is bound to the exact arguments and attempt it was asked
+    for, so approving one call can never authorize another. Requests expire,
+    and an expired or rejected action never runs and gives back its budget,
+    which is held from the moment approval is requested.
+  - Rules can ask for several approvers from given roles
+    (`approvals: { required: 2, roles: [sre] }`) and keep the principal the
+    agent acts for from approving their own action. Quorum holds under
+    concurrent votes.
+  - Signed one-tap approve and reject links, bound to one request and one
+    approver, that work once.
+  - A webhook channel that posts a readable approval card (the action in
+    plain words, the rule and why, the resources, the run's task and taint).
+    Each approver's links go only to their own URL when a request needs more
+    than one person.
+  - An unknown outcome is resolved by a person: approve to run it again,
+    reject to mark it failed for good.
+  - Approval analytics per rule, which flag rules people approve almost every
+    time without thinking.
+  - Approver roles come from the config, never from the person approving,
+    and an approval that is not used in time goes stale and gives back its
+    budget. A retry that needs approval waits for it again.
+- Self-protection: an agent action that runs the `arbitr` command line or
+  touches the ledger, key, policy or config is always denied, in every mode.
+- Operator commands, each with `--json`: `arbitr runs ls|show`,
+  `arbitr intents ls|show|explain`, `arbitr approvals
+  ls|show|approve|reject|decide|stats`, `arbitr recover`, `arbitr verify` and
+  `arbitr export --format jsonl`.
+- Blast radius previews: row counts for
+  SQL (a rewritten `SELECT COUNT(*)` on a read-only connection), a read-only
+  walk of the paths `rm` and `mv` touch with counts per tagged folder,
+  resources a terraform plan destroys, external email recipients, and payment
+  totals. Previews run with a time limit and never raise. Rules test their
+  facts with `when.preview`; a failed preview only ever makes a decision
+  stricter. The redacted preview is stored in the audit chain and read back
+  with `Ledger.preview_of`. Tools can name their own previewer with
+  `ToolSpec.preview`.
 - Repository scaffold, packaging with optional extras, local CI pipeline
   (`make ci`, `make ci-fast`, `make ci-docker`, `make act`), pinned CI Docker
   image, Postgres compose file for tests, git hooks that enforce owner

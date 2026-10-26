@@ -37,8 +37,8 @@ _TOOL_NAME = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.:/-]{0,199}$")
 class ToolSpec(BaseModel):
     """How a tool affects the world and how to make calling it safe.
 
-    Dotted paths (``resource_extractor``, ``probe``, ``compensate``) are written
-    ``package.module:function`` and are resolved only when needed.
+    Dotted paths (``resource_extractor``, ``probe``, ``compensate``, ``preview``)
+    are written ``package.module:function`` and are resolved only when needed.
 
     Example:
         >>> ToolSpec(name="db.query", effect="read").idempotency
@@ -58,6 +58,8 @@ class ToolSpec(BaseModel):
     resource_extractor: str | None = None
     probe: str | None = None
     compensate: str | None = None
+    preview: str | None = None
+    """A previewer for this tool; when None, a built-in one is chosen from its resources."""
     redact: tuple[str, ...] = Field(default=())
     credentials: tuple[str, ...] = Field(default=())
     """Credentials the tool needs. Injected only at execution, after the gate allows it."""
@@ -71,7 +73,7 @@ class ToolSpec(BaseModel):
             )
         return value
 
-    @field_validator("resource_extractor", "probe", "compensate")
+    @field_validator("resource_extractor", "probe", "compensate", "preview")
     @classmethod
     def _check_dotted_path(cls, value: str | None) -> str | None:
         if value is not None and not _DOTTED_PATH.match(value):

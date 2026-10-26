@@ -24,7 +24,7 @@ Example:
     >>> path = pathlib.Path(tempfile.mkdtemp()) / "ledger.db"
     >>> with SQLiteStorage.open(path, Redactor(b"k" * 32)) as db:
     ...     db.schema_version()
-    4
+    5
 """
 
 from __future__ import annotations
@@ -43,7 +43,13 @@ from typing import TYPE_CHECKING, Final, Self
 
 from arbitr.core.audit import Event, VerifyResult, event_hash, genesis_hash, verify_chain
 from arbitr.core.canonical import canonical_json
-from arbitr.core.errors import CanonicalizationError, ScopeError, StaleStateError, StorageError
+from arbitr.core.errors import (
+    ApprovalError,
+    CanonicalizationError,
+    ScopeError,
+    StaleStateError,
+    StorageError,
+)
 from arbitr.core.intent import new_ulid
 from arbitr.core.scope import Scope
 from arbitr.core.states import IntentState, can_transition, check_transition
@@ -98,6 +104,8 @@ _RESERVED_KINDS: Final = _TRANSITION_KINDS | {
     "lease_extended",
     "receipt_recorded",
     "approval_requested",
+    "approval_vote",
+    "approval_decided",
 }
 # What a new intent's updatable columns hold before any transition sets them.
 _COLUMN_DEFAULTS: Final[dict[str, object]] = {
@@ -228,6 +236,33 @@ class ApprovalRow:
     decided_by: str | None
     decided_at: str | None
     note: str | None
+    required: int = 1
+    """How many distinct approvers must approve."""
+    roles: str | None = None
+    """JSON list of roles, one of which an approver must hold; None means anyone."""
+    separate_from: str | None = None
+    """A principal who may not approve this action (the one the agent acts for)."""
+    rule_id: str | None = None
+    summary: str | None = None
+    """A readable card for the approver, as JSON (redacted)."""
+    attempt: int = 0
+    """The intent attempt this approval is for (UNKNOWN outcomes are approved per attempt)."""
+
+    def allowed_roles(self) -> tuple[str, ...]:
+        """The roles that may approve, or an empty tuple for anyone."""
+        return tuple(json.loads(self.roles)) if self.roles else ()
+
+
+@dataclass(frozen=True)
+class VoteRow:
+    """One approver's decision on one approval."""
+
+    approval_id: str
+    approver: str
+    decision: str
+    roles: str
+    note: str | None
+    decided_at: str
 
 
 class Transaction:
@@ -527,6 +562,15 @@ class Transaction:
         )
         return _run_row(row) if row else None
 
+    def runs(self, *, limit: int = 50) -> list[RunRow]:
+        """The most recent runs, newest first."""
+        cur = self._live().execute(
+            "SELECT run_id, principal, agent_id, parent_run_id, scopes, scope, taint, mode,"
+            " created_at FROM runs ORDER BY created_at DESC, run_id DESC LIMIT ?",
+            (limit,),
+        )
+        return [_run_row(r) for r in cur.fetchall()]
+
     def add_taint(self, run_id: str, taint: Taint) -> None:
         """Taint a run, every run below it and every run above it. Taint never decreases.
 
@@ -780,6 +824,46 @@ class Transaction:
         names = [d[0] for d in cur.description]
         return [_intent_row(dict(zip(names, r, strict=True))) for r in cur.fetchall()]
 
+    def find_intents(
+        self,
+        *,
+        run_id: str | None = None,
+        state: IntentState | None = None,
+        tool: str | None = None,
+        since: str | None = None,
+        limit: int = 100,
+    ) -> list[IntentRow]:
+        """Intents matching every filter given, newest first. ``since`` is a database time."""
+        where: list[str] = []
+        params: list[object] = []
+        for column, value in (("run_id", run_id), ("tool", tool)):
+            if value is not None:
+                where.append(f"{column} = ?")
+                params.append(value)
+        if state is not None:
+            where.append("state = ?")
+            params.append(state.value)
+        if since is not None:
+            where.append("created_at >= ?")
+            params.append(since)
+        # Only fixed column names are joined into the text; every value is a parameter.
+        filters = " WHERE " + " AND ".join(where) if where else ""
+        sql = "SELECT * FROM intents" + filters  # noqa: S608  # nosec B608
+        cur = self._live().execute(
+            sql + " ORDER BY created_at DESC, intent_id DESC LIMIT ?", (*params, limit)
+        )
+        names = [d[0] for d in cur.description]
+        return [_intent_row(dict(zip(names, r, strict=True))) for r in cur.fetchall()]
+
+    def intent_events(self, intent_id: str) -> list[Event]:
+        """One intent's events, in order: its whole history."""
+        cur = self._live().execute(
+            "SELECT seq, intent_id, run_id, kind, payload, prev_hash, hash, created_at"
+            " FROM events WHERE intent_id = ? ORDER BY seq",
+            (intent_id,),
+        )
+        return [Event(*row) for row in cur.fetchall()]
+
     def has_been(self, intent_id: str, state: IntentState) -> bool:
         """Whether the intent was ever moved to ``state`` (from its recorded events)."""
         row = (
@@ -871,27 +955,224 @@ class Transaction:
         )
         return ReceiptRow(*found) if found is not None else None
 
-    def create_approval(self, intent_id: str, *, ttl_seconds: float) -> ApprovalRow:
-        """Ask for a human decision on one intent, bound to its intent hash."""
+    def create_approval(  # noqa: PLR0913 - an approval has these independent settings
+        self,
+        intent_id: str,
+        *,
+        ttl_seconds: float,
+        required: int = 1,
+        roles: Sequence[str] = (),
+        separate_from: str | None = None,
+        rule_id: str | None = None,
+        summary: Mapping[str, object] | None = None,
+    ) -> ApprovalRow:
+        """Ask for a human decision on one intent, bound to its intent hash and attempt.
+
+        ``required`` distinct approvers must approve, each holding one of
+        ``roles`` when roles are given; ``separate_from`` (the principal the
+        agent acts for) may not approve. ``summary`` is the readable card,
+        redacted before it is stored.
+        """
         row = self.get_intent(intent_id)
         if row is None:
             raise StaleStateError(f"intent {intent_id} does not exist")
+        if required < 1:
+            raise StorageError("an approval needs at least one approver")
         approval_id = new_ulid()
         expires = self._later(ttl_seconds)
+        role_json = canonical_json(sorted(set(roles))) if roles else None
+        card = canonical_json(self._redactor.redact(dict(summary))) if summary else None
         self._live().execute(
             "INSERT INTO approvals (approval_id, intent_id, intent_hash, status, requested_at,"
-            " expires_at) VALUES (?, ?, ?, 'pending', ?, ?)",
-            (approval_id, intent_id, row.intent_hash, self.now, expires),
-        )
+            " expires_at, required, roles, separate_from, rule_id, summary, attempt)"
+            " VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)",
+            (approval_id, intent_id, row.intent_hash, self.now, expires, required, role_json,
+             separate_from, rule_id, card, row.attempt),
+        )  # fmt: skip
         self._append(
             "approval_requested",
-            {"approval_id": approval_id, "intent_hash": row.intent_hash, "expires_at": expires},
+            {
+                "approval_id": approval_id, "intent_hash": row.intent_hash,
+                "expires_at": expires, "required": required, "roles": role_json,
+                "separate_from": separate_from, "rule_id": rule_id, "attempt": row.attempt,
+            },
             intent_id=intent_id,
             run_id=row.run_id,
             verbatim=True,
+        )  # fmt: skip
+        found = self.get_approval(approval_id)
+        assert found is not None  # noqa: S101 - inserted just above
+        return found
+
+    def vote(  # noqa: PLR0913 - a vote has these independent parts
+        self,
+        approval_id: str,
+        *,
+        approver: str,
+        roles: Sequence[str],
+        decision: str,
+        intent_hash: str,
+        note: str | None = None,
+    ) -> ApprovalRow:
+        """Record one approver's decision and settle the approval when it can be.
+
+        A vote is refused (ApprovalError) when the approval is for different
+        arguments, already decided, the approver lacks a required role, is the
+        principal the agent acts for, or already voted. An approval past its
+        time is expired instead, and returned with status ``expired``, so the
+        expiry is committed. Approval needs ``required`` distinct approvers;
+        one rejection rejects it. Approved: the intent moves to APPROVED.
+        Rejected or expired: it moves to REJECTED or EXPIRED (an UNKNOWN
+        outcome to FAILED) and its budget hold is released.
+        """
+        row = self.get_approval(approval_id)
+        if row is None:
+            raise ApprovalError(f"approval {approval_id} does not exist")
+        _check_vote(row, approver=approver, roles=roles, decision=decision, hash_=intent_hash)
+        if row.expires_at <= self.now:
+            return self._settle(row, "expired")
+        if any(v.approver == approver for v in self.approval_votes(approval_id)):
+            raise ApprovalError(f"{approver} already voted on approval {approval_id}")
+        safe_note = self._redactor.redact_text(note) if note is not None else None
+        role_json = canonical_json(sorted(set(roles)))
+        self._live().execute(
+            "INSERT INTO approval_votes (approval_id, approver, decision, roles, note, decided_at)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (approval_id, approver, decision, role_json, safe_note, self.now),
         )
-        return ApprovalRow(approval_id, intent_id, row.intent_hash, "pending", self.now, expires,
-                           None, None, None)  # fmt: skip
+        self._append(
+            "approval_vote",
+            {"approval_id": approval_id, "approver": approver, "decision": decision,
+             "roles": role_json, "note": safe_note},
+            intent_id=row.intent_id,
+            verbatim=True,
+        )  # fmt: skip
+        if decision == "reject":
+            return self._settle(row, "rejected", by=approver, note=safe_note)
+        approvals = sum(1 for v in self.approval_votes(approval_id) if v.decision == "approve")
+        if approvals >= row.required:
+            return self._settle(row, "approved", by=approver, note=safe_note)
+        found = self.get_approval(approval_id)
+        assert found is not None  # noqa: S101 - read just above
+        return found
+
+    def expire_approval(self, approval_id: str) -> ApprovalRow:
+        """Expire one pending approval now (its action will not run)."""
+        row = self.get_approval(approval_id)
+        if row is None or row.status != "pending":
+            raise ApprovalError(f"approval {approval_id} is not pending")
+        return self._settle(row, "expired")
+
+    def expire_approvals(self, *, stale_after: float | None = None) -> list[ApprovalRow]:
+        """Expire every pending approval past its time, and stale approvals.
+
+        With ``stale_after`` (seconds), an approval granted that long ago whose
+        action has still not started also expires: the action no longer runs
+        and its budget hold is released. Returns the expired approvals.
+        """
+        cur = self._live().execute(
+            "SELECT * FROM approvals WHERE status = 'pending' AND expires_at <= ?"
+            " ORDER BY approval_id",
+            (self.now,),
+        )
+        rows = [ApprovalRow(*r) for r in cur.fetchall()]
+        expired = [self._settle(row, "expired") for row in rows]
+        if stale_after is not None:
+            expired += [self.expire_stale(row) for row in self.stale_approvals(stale_after)]
+        return expired
+
+    def stale_approvals(self, stale_after: float) -> list[ApprovalRow]:
+        """Approvals granted more than ``stale_after`` seconds ago whose action never started."""
+        cutoff = format_db_time(parse_db_time(self.now) - timedelta(seconds=stale_after))
+        cur = self._live().execute(
+            "SELECT a.* FROM approvals a JOIN intents i ON i.intent_id = a.intent_id"
+            " WHERE a.status = 'approved' AND i.state = 'APPROVED' AND a.decided_at <= ?"
+            " ORDER BY a.approval_id",
+            (cutoff,),
+        )
+        return [ApprovalRow(*r) for r in cur.fetchall()]
+
+    def expire_stale(self, row: ApprovalRow) -> ApprovalRow:
+        """Expire an approval whose action did not start in time (APPROVED to EXPIRED)."""
+        self._live().execute(
+            "UPDATE approvals SET status = 'expired' WHERE approval_id = ? AND status = 'approved'",
+            (row.approval_id,),
+        )
+        self._append(
+            "approval_decided",
+            {"approval_id": row.approval_id, "status": "expired"},
+            intent_id=row.intent_id,
+            verbatim=True,
+        )
+        intent = self.get_intent(row.intent_id)
+        if intent is not None and intent.state == IntentState.APPROVED:
+            detail = {"approval_id": row.approval_id, "reason": "approval went stale"}
+            self.transition(
+                row.intent_id, IntentState.EXPIRED, expected=IntentState.APPROVED, detail=detail
+            )
+            self.release_reservations(row.intent_id)
+        found = self.get_approval(row.approval_id)
+        assert found is not None  # noqa: S101 - updated just above
+        return found
+
+    def _settle(
+        self, row: ApprovalRow, status: str, *, by: str | None = None, note: str | None = None
+    ) -> ApprovalRow:
+        self._live().execute(
+            "UPDATE approvals SET status = ?, decided_by = ?, decided_at = ?, note = ?"
+            " WHERE approval_id = ? AND status = 'pending'",
+            (status, by, self.now, note, row.approval_id),
+        )
+        self._append(
+            "approval_decided",
+            {"approval_id": row.approval_id, "status": status},
+            intent_id=row.intent_id,
+            verbatim=True,
+        )
+        self._move_intent(row, status)
+        found = self.get_approval(row.approval_id)
+        assert found is not None  # noqa: S101 - updated just above
+        return found
+
+    def _move_intent(self, row: ApprovalRow, status: str) -> None:
+        intent = self.get_intent(row.intent_id)
+        if intent is None:  # pragma: no cover, approvals reference existing intents
+            return
+        state = intent.state
+        if state == IntentState.PENDING_APPROVAL:
+            target = {"approved": IntentState.APPROVED, "rejected": IntentState.REJECTED,
+                      "expired": IntentState.EXPIRED}[status]  # fmt: skip
+            self.transition(row.intent_id, target, expected=state,
+                            detail={"approval_id": row.approval_id})  # fmt: skip
+        elif state == IntentState.UNKNOWN and status == "rejected":
+            reason = "a human marked the unknown outcome failed"
+            self.transition(
+                row.intent_id, IntentState.FAILED, expected=state,
+                detail={"approval_id": row.approval_id, "reason": reason},
+            )  # fmt: skip
+        # Rejected: the action will not run. Expired: an UNKNOWN outcome keeps its
+        # hold, since the action may have run and still needs a decision.
+        if status == "rejected" or (status == "expired" and state != IntentState.UNKNOWN):
+            self.release_reservations(row.intent_id)
+
+    def approval_votes(self, approval_id: str) -> list[VoteRow]:
+        """Every vote on an approval, in the order cast."""
+        cur = self._live().execute(
+            "SELECT approval_id, approver, decision, roles, note, decided_at FROM approval_votes"
+            " WHERE approval_id = ? ORDER BY decided_at, approver",
+            (approval_id,),
+        )
+        return [VoteRow(*r) for r in cur.fetchall()]
+
+    def approvals(self, status: str | None = None) -> list[ApprovalRow]:
+        """Approvals, newest first, optionally with one status."""
+        sql = "SELECT * FROM approvals"
+        params: tuple[object, ...] = ()
+        if status is not None:
+            sql += " WHERE status = ?"
+            params = (status,)
+        cur = self._live().execute(sql + " ORDER BY requested_at DESC, approval_id DESC", params)
+        return [ApprovalRow(*r) for r in cur.fetchall()]
 
     def get_approval(self, approval_id: str) -> ApprovalRow | None:
         """One approval, or None."""
@@ -914,6 +1195,38 @@ class Transaction:
             .fetchone()
         )
         return ApprovalRow(*found) if found is not None else None
+
+    def latest_event(self, intent_id: str, kind: str) -> Event | None:
+        """The most recent event of ``kind`` for an intent, or None."""
+        found = (
+            self._live()
+            .execute(
+                "SELECT seq, intent_id, run_id, kind, payload, prev_hash, hash, created_at"
+                " FROM events WHERE intent_id = ? AND kind = ? ORDER BY seq DESC LIMIT 1",
+                (intent_id, kind),
+            )
+            .fetchone()
+        )
+        return Event(*found) if found is not None else None
+
+
+def _check_vote(
+    row: ApprovalRow, *, approver: str, roles: Sequence[str], decision: str, hash_: str
+) -> None:
+    """Refuse a vote that can never count, whatever the time."""
+    if decision not in ("approve", "reject"):
+        raise ApprovalError(f"a vote is approve or reject, not {decision!r}")
+    if not approver:
+        raise ApprovalError("an approver must be named")
+    if hash_ != row.intent_hash:
+        raise ApprovalError(f"approval {row.approval_id} is for different arguments")
+    if row.status != "pending":
+        raise ApprovalError(f"approval {row.approval_id} is already {row.status}")
+    allowed = row.allowed_roles()
+    if allowed and not set(roles) & set(allowed):
+        raise ApprovalError(f"approving this needs one of the roles {', '.join(allowed)}")
+    if decision == "approve" and row.separate_from is not None and approver == row.separate_from:
+        raise ApprovalError("an approver cannot approve their own action")  # rejecting is fine
 
 
 def _apply_change(
@@ -1245,24 +1558,54 @@ class SQLiteStorage:
         return None
 
     def _check_approvals(self) -> str | None:
-        """Every approval request must match its approval_requested event."""
+        """Every approval must match its events: the request, each vote and its status."""
         recorded: dict[str, tuple[object, ...]] = {}
+        status: dict[str, str] = {}
+        votes: dict[tuple[str, str], tuple[object, ...]] = {}
         for event in self.events():
+            payload = json.loads(event.payload) if event.kind.startswith("approval_") else {}
+            approval_id = str(payload.get("approval_id"))
             if event.kind == "approval_requested":
-                payload = json.loads(event.payload)
-                recorded[str(payload.get("approval_id"))] = (
-                    event.intent_id,
-                    payload.get("intent_hash"),
-                    payload.get("expires_at"),
-                )
+                recorded[approval_id] = (
+                    event.intent_id, payload.get("intent_hash"), payload.get("expires_at"),
+                    payload.get("required", 1), payload.get("roles"),
+                    payload.get("separate_from"), payload.get("rule_id"),
+                    payload.get("attempt", 0),
+                )  # fmt: skip
+                status[approval_id] = "pending"
+            elif event.kind == "approval_decided":
+                status[approval_id] = str(payload.get("status"))
+            elif event.kind == "approval_vote":
+                votes[(approval_id, str(payload.get("approver")))] = (
+                    payload.get("decision"), payload.get("roles"), payload.get("note"),
+                )  # fmt: skip
+        return self._compare_approvals(recorded, status) or self._compare_votes(votes)
+
+    def _compare_approvals(
+        self, recorded: dict[str, tuple[object, ...]], status: dict[str, str]
+    ) -> str | None:
         cur = self._conn.execute(
-            "SELECT approval_id, intent_id, intent_hash, expires_at FROM approvals"
+            "SELECT approval_id, intent_id, intent_hash, expires_at, required, roles,"
+            " separate_from, rule_id, attempt, status FROM approvals"
         )
-        for approval_id, *values in cur:
+        for approval_id, *values, current in cur:
             if recorded.pop(approval_id, None) != tuple(values):
                 return f"approval {approval_id} does not match its recorded event"
+            if status.get(approval_id) != current:
+                return f"approval {approval_id} status does not match its recorded decision"
         if recorded:
             return f"approval {sorted(recorded)[0]} has an event but no record"
+        return None
+
+    def _compare_votes(self, votes: dict[tuple[str, str], tuple[object, ...]]) -> str | None:
+        cur = self._conn.execute(
+            "SELECT approval_id, approver, decision, roles, note FROM approval_votes"
+        )
+        for approval_id, approver, *values in cur:
+            if votes.pop((approval_id, approver), None) != tuple(values):
+                return f"a vote on approval {approval_id} does not match its recorded event"
+        if votes:
+            return "an approval vote has an event but no record"
         return None
 
     def _check_runs(self) -> str | None:

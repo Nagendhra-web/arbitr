@@ -39,8 +39,9 @@ langgraph = ["langgraph>=0.2"]
 otel = ["opentelemetry-api>=1.27"]
 sql = ["sqlglot>=25"]
 sign = ["cryptography>=43"]
+keyring = ["keyring>=25"]
 all = [
-    "arbitr[cli,server,postgres,mcp,anthropic,openai-agents,langgraph,otel,sql,sign]",
+    "arbitr[cli,server,postgres,mcp,anthropic,openai-agents,langgraph,otel,sql,sign,keyring]",
 ]
 
 [project.scripts]
@@ -112,7 +113,7 @@ convention = "google"
 "bench/**" = ["D", "T20", "PLR2004"]
 "scripts/**" = ["D", "T20", "S101", "S603", "S607", "INP001"]
 "noxfile.py" = ["D", "INP001"]
-"src/arbitr/cli/**" = ["FBT", "B008"]
+"src/arbitr/cli/**" = ["FBT", "B008", "PLR0913", "PLR0917"]  # commands take one argument per option
 "src/arbitr/core/errors.py" = ["N818"]  # public names fixed by the API: ActionDenied, InFlight, ...
 
 # ---------------------------------------------------------------- mypy

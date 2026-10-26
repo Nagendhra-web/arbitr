@@ -140,4 +140,26 @@ CREATE TABLE reservations (
 )
 """,
     ),
+    Migration(
+        5,
+        "approval quorum, roles, summaries and votes",
+        """
+ALTER TABLE approvals ADD COLUMN required INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE approvals ADD COLUMN roles TEXT;
+ALTER TABLE approvals ADD COLUMN separate_from TEXT;
+ALTER TABLE approvals ADD COLUMN rule_id TEXT;
+ALTER TABLE approvals ADD COLUMN summary TEXT;
+ALTER TABLE approvals ADD COLUMN attempt INTEGER NOT NULL DEFAULT 0;
+CREATE INDEX approvals_status ON approvals(status, expires_at);
+CREATE TABLE approval_votes (
+  approval_id TEXT NOT NULL REFERENCES approvals(approval_id),
+  approver TEXT NOT NULL,
+  decision TEXT NOT NULL CHECK (decision IN ('approve', 'reject')),
+  roles TEXT NOT NULL,
+  note TEXT,
+  decided_at TEXT NOT NULL,
+  PRIMARY KEY (approval_id, approver)
+)
+""",
+    ),
 )

@@ -15,7 +15,9 @@ markdown_extensions:
 nav:
   - Home: index.md
   - Concepts: concepts.md
+  - Configuration: configuration.md
   - Policy reference: policy-reference.md
+  - Blast radius previews: previews.md
   - Recovery: recovery.md
   - Integrations: integrations/index.md
   - Operations: operations/index.md

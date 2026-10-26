@@ -75,3 +75,16 @@ Known gap, on purpose:
   the same key (or a future worker process that holds them) can supply. The
   code reports such intents from `recover_stale()`, and the model keeps them
   out of the liveness property rather than pretending they settle.
+
+Two more paths, both in the code and in the model:
+
+- A retry after a clean failure that the policy now holds for a human goes
+  back to PENDING_APPROVAL (FAILED to PENDING_APPROVAL). For a `none` tool
+  that was once UNKNOWN, a human approving that retry counts as an explicit
+  decision to run it again.
+- An approval whose action did not start in time goes stale (APPROVED to
+  EXPIRED); the action never runs.
+
+Only a new intent gets a cancel window: the gate decides a delay for a new
+intent only, so a retry is never scheduled.
+

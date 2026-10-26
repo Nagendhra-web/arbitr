@@ -39,7 +39,7 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -56,10 +56,19 @@ from types import (
 from typing import TYPE_CHECKING, Any, Final, Literal, Self
 from urllib.parse import quote
 
+from arbitr.approvals import (
+    LinkClaim,
+    card_text,
+    check_link,
+    link_token,
+    link_url,
+    read_link,
+)
 from arbitr.core.errors import (
     ActionDenied,
     ActionError,
     ActionScheduled,
+    ApprovalError,
     ApprovalPending,
     ApprovalRejected,
     InFlight,
@@ -78,20 +87,33 @@ from arbitr.core.states import IntentState
 from arbitr.core.taint import Taint, after_tool
 from arbitr.policy.dlp import PrivateFingerprints, outbound_findings
 from arbitr.policy.engine import BudgetCharge, Decision, GateInput, decide
+from arbitr.preview import Preview, preview_action
+from arbitr.protect import REASON as SELF_REASON
+from arbitr.protect import RULE_ID as SELF_RULE
+from arbitr.protect import protected_forms, touches_arbitr
 from arbitr.resources.registry import extract, resolve
 from arbitr.storage.sqlite import SQLiteStorage, parse_db_time
 
 if TYPE_CHECKING:
+    import os
     from datetime import datetime
     from types import TracebackType
 
-    from arbitr.core.audit import VerifyResult
+    from arbitr.approvals import ApprovalNotifier
+    from arbitr.core.audit import Event, VerifyResult
     from arbitr.core.intent import ActionIntent
     from arbitr.core.scope import Scope
     from arbitr.core.spec import ToolSpec
     from arbitr.credentials import CredentialProvider
-    from arbitr.policy.schema import Policy
-    from arbitr.storage.sqlite import ApprovalRow, IntentRow, ReceiptRow, RunRow, Transaction
+    from arbitr.policy.schema import ApprovalRequirement, Policy
+    from arbitr.storage.sqlite import (
+        ApprovalRow,
+        IntentRow,
+        ReceiptRow,
+        RunRow,
+        Transaction,
+        VoteRow,
+    )
 
 S = IntentState
 AMBIGUOUS: Final = (TimeoutError, ConnectionError)
@@ -100,6 +122,25 @@ AMBIGUOUS: Final = (TimeoutError, ConnectionError)
 _CURRENT: contextvars.ContextVar[RunHandle | None] = contextvars.ContextVar(
     "arbitr_run", default=None
 )
+_PREVIEW: contextvars.ContextVar[Preview | None] = contextvars.ContextVar(
+    "arbitr_preview", default=None
+)
+"""The preview of the call being decided, taken before the deciding transaction."""
+
+
+def _with_preview(preview: Preview | None) -> contextvars.Context:
+    """A copy of the current context in which the gate sees ``preview``."""
+    context = contextvars.copy_context()
+    context.run(_PREVIEW.set, preview)
+    return context
+
+
+def _record_preview(tx: Transaction, intent: ActionIntent) -> None:
+    """Store the preview next to the decision, redacted, so an approver can see it."""
+    preview = _PREVIEW.get()
+    if preview is not None:
+        tx.append_event("preview", preview.to_record(), intent_id=intent.intent_id,
+                        run_id=intent.run_id)  # fmt: skip
 
 
 @dataclass
@@ -161,6 +202,7 @@ class _Stop:
     error: Exception | None = None
     result: object = None
     delivered: bool = False  # ``result`` is a tool result handed to the agent
+    new_approval: ApprovalRow | None = None  # an approval request created by this call
 
 
 @dataclass(frozen=True)
@@ -242,6 +284,30 @@ def _scope_charges(tx: Transaction, run_id: str, intent: ActionIntent) -> tuple[
     return tuple(charges)
 
 
+def _with_scope_charges(
+    tx: Transaction, handle: RunHandle, intent: ActionIntent, decision: Decision
+) -> Decision:
+    """Add the run's spend to what the decision reserves.
+
+    A request for approval holds its budget too, so an approved action cannot
+    find the budget gone; a rejection or expiry gives it back. The human
+    approves the spend even past the run's limit, so for an approval the run's
+    spend is counted but its limit does not refuse it.
+    """
+    scope = _scope_charges(tx, handle.run_id, intent)
+    if decision.outcome == "require_approval":
+        scope = _counted_only(tx, scope)
+    return dataclasses.replace(decision, charges=decision.charges + scope)
+
+
+def _counted_only(tx: Transaction, charges: tuple[BudgetCharge, ...]) -> tuple[BudgetCharge, ...]:
+    """The same charges, with each limit raised just enough that they always fit."""
+    current = tx.budget_counters([c.scope_key for c in charges])
+    return tuple(
+        dataclasses.replace(c, limit=max(c.limit, current[c.scope_key] + c.amount)) for c in charges
+    )
+
+
 def _taint_run(tx: Transaction, run_id: str, spec: ToolSpec) -> None:
     """Taint the run with what this tool's output carries."""
     added = after_tool(Taint(), spec)
@@ -277,6 +343,14 @@ def _may_have_acted(tx: Transaction, spec: ToolSpec, row: IntentRow) -> bool:
 _NO_DELAY: Final = (
     "The arguments contain redacted values, so the action needs approval instead of a delay."
 )
+_STALE: Final = "the approval went stale before the action ran; ask for approval again"
+_NEEDS_HUMAN: Final = "the outcome is unknown and needs a human to resolve it"
+_UNKNOWN_DECISION: Final = Decision(
+    "require_approval", "require_approval", "on-unknown",
+    "The outcome is unknown: approve to run it again, reject to record it as failed.",
+    "enforce",
+)  # fmt: skip
+_CARD_TEXT_LIMIT: Final = 120
 _NO_WINDOW: Final = "This retry never had its cancel window, so it needs approval instead."
 
 
@@ -299,23 +373,41 @@ class Ledger:
         key: bytes,
         worker_id: str | None = None,
         lease_ttl: float = 30.0,
-        approval_ttl: float = 900.0,
+        approval_ttl: float | None = None,
         credentials: CredentialProvider | None = None,
         on_step: Callable[[str], None] | None = None,
+        notifier: ApprovalNotifier | None = None,
+        protected_paths: Sequence[str | os.PathLike[str]] = (),
         clock: Callable[[], datetime] | None = None,
         heartbeat: bool = True,
+        preview_context: Mapping[str, object] | None = None,
+        preview_timeout: float = 2.0,
     ) -> None:
-        """Use ``Ledger.open`` instead; it also checks the ledger opens."""
+        """Use ``Ledger.open`` instead; it also checks the ledger opens.
+
+        ``preview_context`` is what previewers get (a read-only database
+        connection, tagged folders, internal email domains); ``preview_timeout``
+        is how many seconds a preview may take before it counts as failed.
+        """
         self.path = Path(path)
         self.policy = policy
         self.worker_id = worker_id or f"{socket.gethostname()}-{uuid.uuid4().hex[:8]}"
         self.lease_ttl = lease_ttl
-        self.approval_ttl = approval_ttl
+        self.approval_ttl = (
+            approval_ttl
+            if approval_ttl is not None
+            else policy.approval.expires_after.total_seconds()
+        )
+        self.notifier = notifier
+        # The ledger file is always protected; the config adds the key, policy and config.
+        self._protected = protected_forms((self.path, *protected_paths))
         self.credentials = credentials
         self.on_step = on_step
         self.clock = clock
         self.heartbeat = heartbeat
         self.probe_context: dict[str, object] = {}
+        self.preview_context: dict[str, object] = dict(preview_context or {})
+        self.preview_timeout = preview_timeout
         self._key = key
         self._local = threading.local()
         self._opened: list[SQLiteStorage] = []
@@ -440,7 +532,10 @@ class Ledger:
             Exception: whatever the tool raised, after the failure is recorded.
         """
         handle, intent = self._intent(spec, args, step_id, idempotency_key)
-        outcome = self._prepare(handle, spec, intent)
+        context = _with_preview(self._preview(spec, intent))
+        outcome = context.run(self._prepare, handle, spec, intent)
+        if isinstance(outcome, _Stop) and outcome.new_approval is not None:
+            self._notify(outcome.new_approval)
         if isinstance(outcome, _Probe):
             outcome = self._run_probe(handle, spec, outcome)
         if isinstance(outcome, _Stop):
@@ -458,8 +553,10 @@ class Ledger:
     ) -> object:
         """The async form of ``execute``. Ledger writes run in a worker thread."""
         handle, intent = self._intent(spec, args, step_id, idempotency_key)
-        context = contextvars.copy_context()
+        context = _with_preview(await asyncio.to_thread(self._preview, spec, intent))
         outcome = await asyncio.to_thread(context.run, self._prepare, handle, spec, intent)
+        if isinstance(outcome, _Stop) and outcome.new_approval is not None:
+            await asyncio.to_thread(self._notify, outcome.new_approval)
         if isinstance(outcome, _Probe):
             outcome = await asyncio.to_thread(self._run_probe, handle, spec, outcome)
         if isinstance(outcome, _Stop):
@@ -493,6 +590,17 @@ class Ledger:
         )
         handle.last_idempotency_key = intent.idempotency_key
         return handle, intent
+
+    def _preview(self, spec: ToolSpec, intent: ActionIntent) -> Preview | None:
+        """The blast radius preview, for destructive and financial intents. Never raises."""
+        return preview_action(
+            spec,
+            intent.effect,
+            intent.resources,
+            intent.args,
+            context=self.preview_context,
+            timeout_s=self.preview_timeout,
+        )
 
     # ------------------------------------------------------------ prepare
 
@@ -557,6 +665,7 @@ class Ledger:
             )
             outside = verdict.outside
         mode = handle.mode if handle.mode is not None else _run_mode(run)
+        preview = _PREVIEW.get()
         return GateInput(
             tool=intent.tool,
             effect=intent.effect,
@@ -573,6 +682,8 @@ class Ledger:
                 intent.effect, args, fingerprints=handle.fingerprints
             ),
             mode=mode,
+            preview=preview.facts if preview is not None else {},
+            preview_ok=preview is None or preview.ok,
         )
 
     def _decide(
@@ -583,16 +694,15 @@ class Ledger:
         intent: ActionIntent,
         state: IntentState,
     ) -> _Plan | _Stop:
-        decision = decide(self._gate_input(tx, handle, spec, intent), self.policy, _Counters(tx))
+        inp, decision = self._gate(tx, handle, spec, intent)
+        _record_preview(tx, intent)
         if decision.outcome == "delay":
             decision = self._delay_or_approval(tx, intent, decision, state)
-        if decision.outcome in ("allow", "delay"):
-            charges = decision.charges + _scope_charges(tx, handle.run_id, intent)
-            decision = dataclasses.replace(decision, charges=charges)
+        holds = decision.outcome in ("allow", "delay", "require_approval")
+        if holds:
+            decision = _with_scope_charges(tx, handle, intent, decision)
         fields = _decision_fields(decision)
-        if decision.outcome in ("allow", "delay") and not tx.reserve_all(
-            decision.charges, intent_id=intent.intent_id
-        ):
+        if holds and not tx.reserve_all(decision.charges, intent_id=intent.intent_id):
             fields.update(decision="deny", decision_rule="budget", decision_reason=_BUDGET)
             decision = Decision("deny", "deny", "budget", _BUDGET, decision.mode)
         if decision.outcome == "deny":
@@ -600,10 +710,12 @@ class Ledger:
                 tx.transition(intent.intent_id, S.DENIED, expected=state, fields=fields)
             return _Stop(ActionDenied(decision.rule_id, decision.reason))
         if decision.outcome == "require_approval":
-            if state == S.PROPOSED:
+            # A retry after FAILED waits for a human just like a new action.
+            if state in (S.PROPOSED, S.FAILED):
                 tx.transition(intent.intent_id, S.PENDING_APPROVAL, expected=state, fields=fields)
-            approval = self._open_approval(tx, intent.intent_id)
-            return _Stop(ApprovalPending(approval.approval_id, decision.rule_id, decision.reason))
+            approval, created = self._open_approval(tx, handle, intent, decision, inp)
+            return _Stop(ApprovalPending(approval.approval_id, decision.rule_id, decision.reason),
+                         new_approval=approval if created else None)  # fmt: skip
         if state == S.PROPOSED:
             tx.transition(intent.intent_id, S.APPROVED, expected=state, fields=fields)
             if decision.outcome == "delay":
@@ -616,12 +728,62 @@ class Ledger:
         )
         return _Plan(intent, row.attempt)
 
-    def _open_approval(self, tx: Transaction, intent_id: str) -> ApprovalRow:
-        """The intent's pending approval request, or a new one if none is open."""
-        approval = tx.approval_for_intent(intent_id)
-        if approval is None or approval.status != "pending" or approval.expires_at <= tx.now:
-            approval = tx.create_approval(intent_id, ttl_seconds=self.approval_ttl)
-        return approval
+    def _open_approval(
+        self,
+        tx: Transaction,
+        handle: RunHandle,
+        intent: ActionIntent,
+        decision: Decision,
+        inp: GateInput | None,
+    ) -> tuple[ApprovalRow, bool]:
+        """The intent's open approval request, or a new one. True when it is new."""
+        approval = tx.approval_for_intent(intent.intent_id)
+        if approval is not None and approval.status == "pending" and approval.expires_at > tx.now:
+            return approval, False
+        need = decision.approval or self.policy.approval
+        card = self._card(tx, intent, decision, inp)
+        approval = tx.create_approval(
+            intent.intent_id, ttl_seconds=self.approval_ttl, required=need.required,
+            roles=need.roles or (), rule_id=decision.rule_id, summary=card,
+            separate_from=handle.principal if need.separate_from_principal else None,
+        )  # fmt: skip
+        return approval, True
+
+    def _card(
+        self, tx: Transaction, intent: ActionIntent, decision: Decision, inp: GateInput | None
+    ) -> dict[str, object]:
+        """The readable card an approver sees (redacted again when it is stored)."""
+        row = tx.get_intent(intent.intent_id)
+        stored = json.loads(row.args_redacted) if row is not None else {}
+        full = stored if isinstance(stored, dict) else {}
+        args = {k: _short(v) for k, v in full.items()}
+        run = tx.get_run(intent.run_id)
+        card: dict[str, object] = {
+            "tool": intent.tool, "effect": intent.effect, "args": args, "args_full": full,
+            "truncated": args != full,
+            "rule": decision.rule_id, "reason": decision.reason,
+            "resources": [{"kind": r.kind, "uri": r.uri, "tags": sorted(r.tags)}
+                          for r in (inp.resources if inp is not None else ())],
+            "taint": inp.taint.to_dict() if inp is not None else {},
+            "outside_scope": bool(inp is not None and inp.outside_scope),
+            "task": run.scope.task if run is not None and run.scope is not None else None,
+        }  # fmt: skip
+        preview = _PREVIEW.get()
+        if preview is not None:
+            card["preview"] = {"summary": preview.summary, "facts": dict(preview.facts),
+                               "ok": preview.ok, "error": preview.error}  # fmt: skip
+        card["text"] = card_text(card)
+        return card
+
+    def _gate(
+        self, tx: Transaction, handle: RunHandle, spec: ToolSpec, intent: ActionIntent
+    ) -> tuple[GateInput, Decision]:
+        """The gate's decision, after the self-protection check that no mode can loosen."""
+        inp = self._gate_input(tx, handle, spec, intent)
+        if touches_arbitr(intent.args, self._protected):
+            # An agent may not operate Arbitr or touch its ledger, key, policy or config.
+            return inp, Decision("deny", "deny", SELF_RULE, SELF_REASON, "enforce")
+        return inp, decide(inp, self.policy, _Counters(tx))
 
     def _delay_or_approval(
         self, tx: Transaction, intent: ActionIntent, decision: Decision, state: IntentState
@@ -668,10 +830,7 @@ class Ledger:
         if state in (S.REJECTED, S.EXPIRED, S.CANCELLED):
             return _Stop(ApprovalRejected(f"the action was {state.value.lower()}"))
         if state == S.PENDING_APPROVAL:
-            approval = tx.approval_for_intent(row.intent_id)
-            approval_id = approval.approval_id if approval else "unknown"
-            return _Stop(ApprovalPending(approval_id, row.decision_rule or "policy",
-                                         row.decision_reason or ""))  # fmt: skip
+            return self._still_pending(tx, row)
         if state == S.SCHEDULED:
             if row.scheduled_for is None or row.scheduled_for > tx.now:
                 return _Stop(ActionScheduled(row.intent_id, row.scheduled_for or "later"))
@@ -679,10 +838,10 @@ class Ledger:
         if state == S.PROPOSED:
             return self._decide(tx, handle, spec, intent, S.PROPOSED)
         if state == S.APPROVED:
-            return _Plan(intent, 0)
+            return self._approved(tx, row, intent)
         if state == S.FAILED:
             return self._retry_failed(tx, handle, spec, intent, row)
-        return self._recover(tx, spec, intent, row)
+        return self._recover(tx, handle, spec, intent, row)
 
     def _retry_failed(
         self,
@@ -698,7 +857,12 @@ class Ledger:
         return self._decide(tx, handle, spec, intent, S.FAILED)
 
     def _recover(
-        self, tx: Transaction, spec: ToolSpec, intent: ActionIntent, row: IntentRow
+        self,
+        tx: Transaction,
+        handle: RunHandle,
+        spec: ToolSpec,
+        intent: ActionIntent,
+        row: IntentRow,
     ) -> _Plan | _Stop | _Probe:
         """EXECUTING (lease expired) or UNKNOWN: section on recovery in the module docstring."""
         if row.state == S.EXECUTING:
@@ -715,10 +879,35 @@ class Ledger:
             return _Plan(intent, started.attempt)
         if spec.idempotency == "probe":
             return _Probe(intent, row)
-        return self._on_unknown(tx, spec, intent, row)
+        return self._on_unknown(tx, handle, spec, intent, row)
+
+    def _approved(self, tx: Transaction, row: IntentRow, intent: ActionIntent) -> _Plan | _Stop:
+        """An approved action runs, unless its approval went stale before it started."""
+        approval = tx.approval_for_intent(row.intent_id)
+        if approval is not None and approval.status == "approved" and approval.decided_at:
+            stale = tx.stale_approvals(self.approval_ttl)
+            if any(a.approval_id == approval.approval_id for a in stale):
+                tx.expire_stale(approval)
+                return _Stop(ApprovalRejected(_STALE))
+        return _Plan(intent, 0)
+
+    def _still_pending(self, tx: Transaction, row: IntentRow) -> _Stop:
+        """A call while waiting for approval: still waiting, or expired just now."""
+        approval = tx.approval_for_intent(row.intent_id)
+        if approval is not None and approval.status == "pending" and approval.expires_at <= tx.now:
+            tx.expire_approval(approval.approval_id)
+            return _Stop(ApprovalRejected("the approval request expired"))
+        approval_id = approval.approval_id if approval else "unknown"
+        return _Stop(ApprovalPending(approval_id, row.decision_rule or "policy",
+                                     row.decision_reason or ""))  # fmt: skip
 
     def _on_unknown(
-        self, tx: Transaction, spec: ToolSpec, intent: ActionIntent, row: IntentRow
+        self,
+        tx: Transaction,
+        handle: RunHandle,
+        spec: ToolSpec,
+        intent: ActionIntent,
+        row: IntentRow,
     ) -> _Plan | _Stop:
         rule = self.policy.on_unknown
         if rule == "retry" and spec.allow_duplicates:
@@ -729,9 +918,34 @@ class Ledger:
             tx.transition(row.intent_id, S.FAILED, expected=S.UNKNOWN,
                           detail={"reason": "outcome unknown; policy says fail"})  # fmt: skip
             return _Stop(UnknownOutcome("the outcome is unknown; it was recorded as failed"))
-        if tx.approval_for_intent(row.intent_id) is None:
-            tx.create_approval(row.intent_id, ttl_seconds=self.approval_ttl)
-        return _Stop(UnknownOutcome("the outcome is unknown and needs a human to resolve it"))
+        approval = tx.approval_for_intent(row.intent_id)
+        if approval is not None and approval.attempt == row.attempt:
+            if approval.status == "approved":  # a human chose to run it again
+                started = tx.start_execution(
+                    row.intent_id, expected=S.UNKNOWN, worker=self.worker_id,
+                    ttl_seconds=self.lease_ttl,
+                )  # fmt: skip
+                return _Plan(intent, started.attempt)
+            if approval.status == "pending" and approval.expires_at > tx.now:
+                return _Stop(UnknownOutcome(_NEEDS_HUMAN))
+        need = self._requirement_for(row)
+        run = tx.get_run(row.run_id)
+        tx.create_approval(
+            row.intent_id, ttl_seconds=self.approval_ttl, rule_id="on-unknown",
+            required=need.required, roles=need.roles or (),
+            separate_from=run.principal if run is not None and need.separate_from_principal
+            else None,
+            summary=self._card(tx, intent, _UNKNOWN_DECISION,
+                               self._gate_input(tx, handle, spec, intent)),
+        )  # fmt: skip
+        return _Stop(UnknownOutcome(_NEEDS_HUMAN))
+
+    def _requirement_for(self, row: IntentRow) -> ApprovalRequirement:
+        """Who must approve re-running an action: its rule's approvers, else the policy's."""
+        rule = next((r for r in self.policy.rules if r.id == row.decision_rule), None)
+        if rule is not None and rule.approvals is not None:
+            return rule.approvals
+        return self.policy.approval
 
     def _run_probe(self, handle: RunHandle, spec: ToolSpec, pending: _Probe) -> _Plan | _Stop:
         """Ask the service whether the side effect happened, outside any transaction."""
@@ -1062,6 +1276,152 @@ class Ledger:
             return self.execute(spec, args, fn, step_id=row.step_id,
                                 idempotency_key=row.idempotency_key)  # fmt: skip
 
+    # ------------------------------------------------------------ approvals
+
+    def approve(
+        self, approval_id: str, *, approver: str, roles: Sequence[str] = (), note: str | None = None
+    ) -> ApprovalRow:
+        """Approve a request as ``approver``. The action runs on the agent's next call.
+
+        Raises:
+            ApprovalError: unknown, already decided, expired, the wrong role,
+                the principal approving their own action, or a second vote.
+        """
+        return self._vote(approval_id, approver=approver, roles=roles, decision="approve",
+                          note=note)  # fmt: skip
+
+    def reject(
+        self, approval_id: str, *, approver: str, roles: Sequence[str] = (), note: str | None = None
+    ) -> ApprovalRow:
+        """Reject a request. The action never runs, and its budget hold is released."""
+        return self._vote(approval_id, approver=approver, roles=roles, decision="reject",
+                          note=note)  # fmt: skip
+
+    def _vote(  # noqa: PLR0913 - a vote has these parts
+        self,
+        approval_id: str,
+        *,
+        approver: str,
+        roles: Sequence[str],
+        decision: str,
+        note: str | None,
+        token_hash: str | None = None,
+    ) -> ApprovalRow:
+        with self._storage().transaction() as tx:
+            row = tx.get_approval(approval_id)
+            if row is None:
+                raise ApprovalError(f"approval {approval_id} does not exist")
+            result = tx.vote(approval_id, approver=approver, roles=tuple(roles),
+                             decision=decision, note=note,
+                             intent_hash=token_hash or row.intent_hash)  # fmt: skip
+        if result.status == "expired":
+            raise ApprovalError(f"approval {approval_id} expired before the decision")
+        return result
+
+    def approval(self, approval_id: str) -> ApprovalRow | None:
+        """One approval request, or None."""
+        with self._storage().transaction() as tx:
+            return tx.get_approval(approval_id)
+
+    def approvals(self, status: str | None = None) -> list[ApprovalRow]:
+        """Approval requests, newest first, optionally only one status."""
+        with self._storage().transaction() as tx:
+            return tx.approvals(status)
+
+    def approval_votes(self, approval_id: str) -> list[VoteRow]:
+        """The votes cast on one approval."""
+        with self._storage().transaction() as tx:
+            return tx.approval_votes(approval_id)
+
+    def expire_approvals(self) -> list[ApprovalRow]:
+        """Expire requests past their time and approvals whose action never started in time.
+
+        Either way the action will not run, and its budget hold is released.
+        """
+        with self._storage().transaction() as tx:
+            return tx.expire_approvals(stale_after=self.approval_ttl)
+
+    def approval_card(self, approval_id: str) -> dict[str, object]:
+        """The readable card for an approval, with its status and votes."""
+        with self._storage().transaction() as tx:
+            row = tx.get_approval(approval_id)
+            if row is None:
+                raise ApprovalError(f"approval {approval_id} does not exist")
+            votes = tx.approval_votes(approval_id)
+        card: dict[str, object] = json.loads(row.summary) if row.summary else {}
+        card.update(
+            approval_id=row.approval_id, intent_id=row.intent_id, status=row.status,
+            requested_at=row.requested_at, expires_at=row.expires_at, required=row.required,
+            roles=list(row.allowed_roles()),
+            votes=[{"approver": v.approver, "decision": v.decision, "note": v.note}
+                   for v in votes],
+        )  # fmt: skip
+        return card
+
+    def approval_links(
+        self, approval_id: str, *, approver: str, base_url: str, roles: Sequence[str] = ()
+    ) -> dict[str, str]:
+        """Signed one-tap approve and reject links for one approver."""
+        row = self.approval(approval_id)
+        if row is None:
+            raise ApprovalError(f"approval {approval_id} does not exist")
+        return {
+            decision: link_url(base_url, link_token(
+                self._key, row, LinkClaim(approval_id, approver, tuple(roles), decision)))
+            for decision in ("approve", "reject")
+        }  # fmt: skip
+
+    def decide_by_link(self, token: str, *, note: str | None = None) -> ApprovalRow:
+        """Apply the decision in a signed link. A link works for its own approval only, once."""
+        claim, _ = read_link(token)
+        row = self.approval(claim.approval_id)
+        if row is None:
+            raise ApprovalError("this approval link's signature does not match")
+        check_link(self._key, token, row)
+        return self._vote(claim.approval_id, approver=claim.approver, roles=claim.roles,
+                          decision=claim.decision, note=note,
+                          token_hash=row.intent_hash)  # fmt: skip
+
+    def _notify(self, approval: ApprovalRow) -> None:
+        if self.notifier is None:
+            return
+        with contextlib.suppress(Exception):  # a channel failure must never fail the call
+            self.notifier.notify(self, approval, self.approval_card(approval.approval_id))
+
+    # ------------------------------------------------------------ reading
+
+    def runs(self, *, limit: int = 50) -> list[RunRow]:
+        """The most recent runs, newest first."""
+        with self._storage().transaction() as tx:
+            return tx.runs(limit=limit)
+
+    def run_record(self, run_id: str) -> RunRow | None:
+        """One run as stored, or None."""
+        with self._storage().transaction() as tx:
+            return tx.get_run(run_id)
+
+    def find_intents(
+        self,
+        *,
+        run_id: str | None = None,
+        state: IntentState | None = None,
+        tool: str | None = None,
+        since: str | None = None,
+        limit: int = 100,
+    ) -> list[IntentRow]:
+        """Intents matching every filter given, newest first."""
+        with self._storage().transaction() as tx:
+            return tx.find_intents(run_id=run_id, state=state, tool=tool, since=since, limit=limit)
+
+    def intent_events(self, intent_id: str) -> list[Event]:
+        """One intent's history, in order."""
+        with self._storage().transaction() as tx:
+            return tx.intent_events(intent_id)
+
+    def events(self) -> list[Event]:
+        """Every audit event, in order."""
+        return list(self._storage().events())
+
     def intent(self, intent_id: str) -> IntentRow | None:
         """The intent with this id, or None."""
         with self._storage().transaction() as tx:
@@ -1071,6 +1431,12 @@ class Ledger:
         """The intent with this idempotency key, or None."""
         with self._storage().transaction() as tx:
             return tx.get_intent_by_key(key)
+
+    def preview_of(self, intent_id: str) -> Preview | None:
+        """The latest preview recorded for an intent (redacted, for approvers), or None."""
+        with self._storage().transaction() as tx:
+            event = tx.latest_event(intent_id, "preview")
+        return None if event is None else Preview.from_record(json.loads(event.payload))
 
     def receipt(self, intent_id: str) -> ReceiptRow | None:
         """The receipt of an intent, or None."""
@@ -1352,6 +1718,19 @@ def _safe_repr(exc: BaseException) -> str:
         return repr(exc) + repr(vars(exc))
     except Exception:  # noqa: BLE001 - only used to look for credentials
         return ""
+
+
+def _short(value: object) -> object:
+    """A card shows short values: long text keeps its head and tail and says how long it is.
+
+    The card also carries ``args_full`` and ``truncated``, so nothing is hidden
+    from an approver who looks.
+    """
+    if isinstance(value, str) and len(value) > _CARD_TEXT_LIMIT:
+        return f"{value[:80]} ... {value[-40:]} ({len(value):,} characters)"
+    if isinstance(value, dict | list) and len(json.dumps(value)) > _CARD_TEXT_LIMIT:
+        return f"<{type(value).__name__} of {len(value)} items, cut>"
+    return value
 
 
 def _by_id(row: IntentRow) -> str:

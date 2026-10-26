@@ -18,6 +18,12 @@ Evaluation:
 5. In shadow mode the decision is recorded but the call is allowed, except
    that matching ``always_enforce`` rules still apply (the strictest of them).
 
+Preview conditions (``when.preview``) test the facts of the action's blast
+radius preview. When the preview failed (``preview_ok=False``) its facts
+cannot be trusted, so the gate decides twice: once as if every rule with a
+preview condition matched, and once as if none did, and keeps the stricter
+decision. A failed preview can therefore only make a decision stricter.
+
 Reasons come only from the policy text, never from argument values, so a
 decision can be shown or logged without leaking what the agent sent.
 """
@@ -26,7 +32,7 @@ from __future__ import annotations
 
 import fnmatch
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC
 from typing import TYPE_CHECKING, Final, Literal
 
@@ -40,6 +46,7 @@ if TYPE_CHECKING:
     from datetime import datetime
 
     from arbitr.policy.schema import (
+        ApprovalRequirement,
         Budget,
         Outcome,
         Policy,
@@ -94,6 +101,10 @@ class GateInput:
     outside_scope: bool = False
     outbound_findings: frozenset[str] = frozenset()
     mode: Literal["enforce", "shadow"] | None = None
+    preview: Mapping[str, object] = field(default_factory=dict)
+    """Facts of the action's blast radius preview; empty when it was not previewed."""
+    preview_ok: bool = True
+    """False when the preview timed out or failed, so its facts cannot be trusted."""
 
     def __post_init__(self) -> None:
         """Refuse unknown effects and naive times; keep times in UTC.
@@ -118,6 +129,7 @@ class RuleMatch:
     always_enforce: bool = False
     budget: bool = False
     delay_seconds: float = 0.0
+    approvals: ApprovalRequirement | None = None
 
 
 @dataclass(frozen=True)
@@ -143,9 +155,13 @@ class Decision:
     charges: tuple[BudgetCharge, ...] = ()
     delay_seconds: float = 0.0
     """How long a ``delay`` outcome waits before the action runs (0 otherwise)."""
+    approval: ApprovalRequirement | None = None
+    """Who must approve, from the winning rule, when the outcome is require_approval."""
     shadow_rule_id: str = ""
     """The rule enforce mode would have applied (the same as rule_id in enforce mode)."""
     shadow_reason: str = ""
+    preview_assumed: bool = False
+    """The preview failed, so rules on preview facts were judged by the stricter result."""
 
     def explain(self) -> str:
         """Plain-English account of every matching rule and why the winner won."""
@@ -167,6 +183,11 @@ class Decision:
             )
         else:
             lines.append("No rule matched, so the policy default for the effect applied.")
+        if self.preview_assumed:
+            lines.append(
+                "The preview failed, so rules on preview facts counted as matching"
+                " wherever that gave the stricter decision."
+            )
         lines.extend(
             f"Budget {c.rule_id}: will reserve {c.amount:g} of {c.limit:g} ({c.scope_key})."
             for c in self.charges
@@ -284,9 +305,19 @@ def _args_ok(when: When, inp: GateInput, policy: Policy) -> bool:
 _CHECKS: Final = (_tool_ok, _effect_ok, _who_ok, _resources_ok, _taint_ok, _context_ok, _args_ok)
 
 
-def _matches(when: When, inp: GateInput, policy: Policy) -> bool:
-    """Every condition in ``when`` holds. Cheap checks run before argument checks."""
-    return all(check(when, inp, policy) for check in _CHECKS)
+def _matches(when: When, inp: GateInput, policy: Policy, *, assume: bool | None) -> bool:
+    """Every condition in ``when`` holds. Cheap checks run before argument checks.
+
+    ``assume`` replaces the preview conditions when the preview failed: True
+    treats them as holding, False as not holding, None evaluates them.
+    """
+    if not all(check(when, inp, policy) for check in _CHECKS):
+        return False
+    if when.preview is None:
+        return True
+    if assume is not None:
+        return assume
+    return all(evaluate(c, inp.preview) for c in when.preview)
 
 
 def _evaluate_rule(
@@ -296,16 +327,18 @@ def _evaluate_rule(
         assert rule.then is not None  # noqa: S101, guaranteed by the schema
         delay = rule.delay_seconds or 0.0
         return RuleMatch(
-            rule.id, rule.then, rule.reason, rule.always_enforce, delay_seconds=delay
-        ), None
+            rule.id, rule.then, rule.reason, rule.always_enforce, delay_seconds=delay,
+            approvals=rule.approvals,
+        ), None  # fmt: skip
     assert rule.then_exceeded is not None  # noqa: S101, guaranteed by the schema
     key = budget_key(rule.id, rule.budget, inp)
     amount = _measure(rule.budget, inp.args)
     exceeded = amount is None or counters.get(key, 0.0) + amount > rule.budget.limit
     if exceeded:
         match = RuleMatch(
-            rule.id, rule.then_exceeded, rule.reason, rule.always_enforce, budget=True
-        )
+            rule.id, rule.then_exceeded, rule.reason, rule.always_enforce, budget=True,
+            approvals=rule.approvals,
+        )  # fmt: skip
         return match, None
     assert amount is not None  # noqa: S101, checked just above
     if amount == 0:
@@ -314,11 +347,40 @@ def _evaluate_rule(
 
 
 def decide(inp: GateInput, policy: Policy, counters: Mapping[str, float]) -> Decision:
-    """Decide one action. Pure: no I/O, no clock, no mutation of the inputs."""
+    """Decide one action. Pure: no I/O, no clock, no mutation of the inputs.
+
+    A failed preview is decided both ways (see the module docstring) and the
+    stricter decision is kept; ties keep the one where preview rules matched,
+    which also reserves their budgets.
+    """
+    if inp.preview_ok or not _depends_on_preview(inp, policy):
+        return _decide(inp, policy, counters, assume=None)
+    strict = _decide(inp, policy, counters, assume=True)
+    lenient = _decide(inp, policy, counters, assume=False)
+    winner = lenient if _severity(lenient) > _severity(strict) else strict
+    return replace(winner, preview_assumed=True)
+
+
+def _depends_on_preview(inp: GateInput, policy: Policy) -> bool:
+    """Whether any rule with a preview condition could match apart from it."""
+    return any(
+        rule.when.preview is not None and _matches(rule.when, inp, policy, assume=True)
+        for rule in policy.rules
+    )
+
+
+def _severity(decision: Decision) -> tuple[int, float, int]:
+    """Orders decisions by strictness: the outcome, then the delay, then enforce mode's outcome."""
+    return (RANK[decision.outcome], decision.delay_seconds, RANK[decision.shadow_outcome])
+
+
+def _decide(
+    inp: GateInput, policy: Policy, counters: Mapping[str, float], *, assume: bool | None
+) -> Decision:
     matches: list[RuleMatch] = []
     charges: list[BudgetCharge] = []
     for rule in policy.rules:
-        if not _matches(rule.when, inp, policy):
+        if not _matches(rule.when, inp, policy, assume=assume):
             continue
         match, charge = _evaluate_rule(rule, inp, counters)
         if match is not None:
@@ -356,6 +418,7 @@ def decide(inp: GateInput, policy: Policy, counters: Mapping[str, float]) -> Dec
         matches=tuple(matches),
         charges=tuple(charges) if applied.outcome != "deny" else (),
         delay_seconds=applied.delay_seconds if applied.outcome == "delay" else 0.0,
+        approval=applied.approvals if applied.outcome == "require_approval" else None,
         shadow_rule_id=winner.rule_id,
         shadow_reason=winner.reason,
     )

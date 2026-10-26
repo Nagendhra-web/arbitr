@@ -60,6 +60,8 @@ TRANSITIONS: Final[frozenset[tuple[IntentState, IntentState]]] = frozenset(
         (S.APPROVED, S.SCHEDULED),  # allowed with a delay: a cancel window
         (S.SCHEDULED, S.EXECUTING),  # the window passed
         (S.SCHEDULED, S.CANCELLED),  # a human or a breaker cancelled it in time
+        (S.FAILED, S.PENDING_APPROVAL),  # a retry the policy now holds for a human
+        (S.APPROVED, S.EXPIRED),  # an approval nobody acted on in time
     }
 )
 """Every legal (from, to) pair. Anything else is a bug."""

@@ -36,7 +36,9 @@ Transitions == {
     <<"SUCCEEDED", "COMPENSATED">>,
     <<"APPROVED", "SCHEDULED">>,
     <<"SCHEDULED", "EXECUTING">>,
-    <<"SCHEDULED", "CANCELLED">>
+    <<"SCHEDULED", "CANCELLED">>,
+    <<"FAILED", "PENDING_APPROVAL">>,
+    <<"APPROVED", "EXPIRED">>
 }
 \* END TRANSITIONS
 
@@ -84,8 +86,10 @@ LegalTransitions ==
 TerminalIsFinal ==
     [][\A i \in Intents : state[i] \in Terminal => state'[i] = state[i]]_vars
 
-(* Execution never happens without a prior allow or approval. *)
+(* Execution never happens without a prior allow or approval: EXECUTING is *)
+(* entered only from states the gate let through, so an intent that ran is *)
+(* never undecided or denied. A retry may go back for approval and then be *)
+(* approved, rejected or expire.                                           *)
 ExecutesOnlyAfterApproval ==
-    \A i \in Intents : attempt[i] > 0 =>
-        state[i] \in {"EXECUTING", "SUCCEEDED", "FAILED", "UNKNOWN", "COMPENSATED"}
+    \A i \in Intents : attempt[i] > 0 => state[i] \notin {"PROPOSED", "DENIED"}
 =============================================================================

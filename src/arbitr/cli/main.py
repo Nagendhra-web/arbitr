@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import platform
 import sys
-from pathlib import Path  # noqa: TC003 - typer reads the annotations at runtime
+from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn
 
 import arbitr
@@ -17,6 +17,7 @@ import arbitr
 if TYPE_CHECKING:
     import typer
 
+    from arbitr.config import InitResult
     from arbitr.core.spec import ToolSpec
 
 INSTALL_HINT = 'The arbitr CLI needs the "cli" extra. Install it with: pip install "arbitr[cli]"'
@@ -62,7 +63,13 @@ def _build_app() -> typer.Typer:
         else:
             Console().print(f"arbitr {info['arbitr']} (Python {info['python']})")
 
+    _add_init(app)
     app.add_typer(_policy_app(), name="policy")
+    app.add_typer(_config_app(), name="config")
+
+    from arbitr.cli.ops import register  # noqa: PLC0415 - needs the cli extra
+
+    register(app)
     return app
 
 
@@ -158,6 +165,110 @@ def _policy_app() -> typer.Typer:  # noqa: C901 - one nested function per comman
     ) -> None:
         """Print the JSON Schema for policy files."""
         typer.echo(json.dumps(json_schema(), indent=2, sort_keys=True))
+
+    return app
+
+
+def _init_lines(result: InitResult) -> list[str]:
+    lines = [
+        (
+            f"Created {result.config.name}, {result.policy.name} and a new ledger key"
+            f" in {result.folder}."
+        ),
+        f"Ledger: {result.ledger}" + ("" if result.ledger_created else " (kept the existing one)"),
+    ]
+    if result.gitignore == "added":
+        lines.append("Added .arbitr/ to .gitignore.")
+    elif result.gitignore == "missing":
+        lines.append(
+            "No .gitignore here: keep .arbitr/ out of version control, it holds the ledger key."
+        )
+    lines.append("Next: arbitr config check")
+    return lines
+
+
+def _init_json(result: InitResult) -> dict[str, object]:
+    return {
+        "ok": True,
+        "folder": str(result.folder),
+        "config": str(result.config),
+        "policy": str(result.policy),
+        "key_file": str(result.key_file),
+        "ledger": str(result.ledger),
+        "ledger_created": result.ledger_created,
+        "packs": list(result.packs),
+        "gitignore": result.gitignore,
+    }
+
+
+def _add_init(app: typer.Typer) -> None:
+    import typer  # noqa: PLC0415
+
+    from arbitr.config import ConfigError, init_project  # noqa: PLC0415
+
+    @app.command("init")
+    def init_cmd(
+        folder: Path = typer.Option(Path(), "--dir", help="The project folder."),
+        packs: str = typer.Option("", "--packs", help="Policy packs to include, comma separated."),
+        force: bool = typer.Option(False, "--force", help="Replace existing files and the key."),
+        as_json: bool = typer.Option(False, "--json", help="Print machine-readable JSON."),
+    ) -> None:
+        """Write arbitr.yaml, a starter policy and a new ledger key, then create the ledger."""
+        names = tuple(p.strip() for p in packs.split(",") if p.strip())
+        try:
+            result = init_project(folder, packs=names, force=force)
+        except (ConfigError, OSError) as exc:
+            if as_json:
+                typer.echo(json.dumps({"ok": False, "error": str(exc)}, sort_keys=True))
+            else:
+                typer.echo(f"error: {exc}")
+            raise typer.Exit(1) from None
+        if as_json:
+            typer.echo(json.dumps(_init_json(result), sort_keys=True))
+            return
+        for line in _init_lines(result):
+            typer.echo(line)
+
+
+def _config_app() -> typer.Typer:
+    import typer  # noqa: PLC0415
+
+    from arbitr.config import ConfigError, load_config  # noqa: PLC0415
+
+    app = typer.Typer(help="Check the Arbitr configuration.", no_args_is_help=True)
+
+    @app.command("check")
+    def check_cmd(
+        config: Path | None = typer.Option(
+            None, "--config", help="The config file (default: ARBITR_CONFIG, then arbitr.yaml)."
+        ),
+        as_json: bool = typer.Option(False, "--json", help="Print machine-readable JSON."),
+    ) -> None:
+        """Validate the config, policy, key and ledger without running anything.
+
+        Exits 1 and lists the problems when anything is unusable.
+        """
+        report: dict[str, object] = {"config": None if config is None else str(config)}
+        try:
+            cfg = load_config(config)
+        except ConfigError as exc:
+            problems = [str(exc)]
+        else:
+            problems = cfg.check()
+            report |= {"config": str(cfg.source), "ledger": str(cfg.ledger)}
+            report |= {"policy": str(cfg.policy)}
+        report |= {"ok": not problems, "problems": problems}
+        if as_json:
+            typer.echo(json.dumps(report, sort_keys=True))
+        elif problems:
+            typer.echo(f"Problems in {report['config'] or 'the configuration'}:")
+            for problem in problems:
+                typer.echo(f"- {problem}")
+        else:
+            typer.echo(f"Configuration OK: {report['config']}")
+            typer.echo(f"Ledger {report['ledger']} opens and its audit chain verifies.")
+        if problems:
+            raise typer.Exit(1)
 
     return app
 

@@ -184,6 +184,8 @@ class When(_Model):
     outside_scope: bool | None = None
     scope_required: str | None = None
     outbound_findings_any: tuple[str, ...] | None = None
+    preview: tuple[ArgCondition, ...] | None = None
+    """Tests on the action's preview facts, with the same operators as ``args``."""
 
     @model_validator(mode="after")
     def _not_empty(self) -> When:
@@ -214,6 +216,16 @@ class Budget(_Model):
         return self
 
 
+class ApprovalRequirement(_Model):
+    """Who must approve: how many distinct people, from which roles."""
+
+    required: int = Field(default=1, ge=1, le=10)
+    roles: tuple[str, ...] | None = None
+    """An approver must hold one of these roles; None means anyone may approve."""
+    separate_from_principal: bool = False
+    """The principal the agent acts for may not approve the action."""
+
+
 class Rule(_Model):
     """One policy rule: conditions, then an outcome (or a budget and its outcome)."""
 
@@ -225,6 +237,8 @@ class Rule(_Model):
     then_exceeded: Outcome | None = None
     reason: str = Field(min_length=1, max_length=500)
     always_enforce: bool = False
+    approvals: ApprovalRequirement | None = None
+    """Who must approve, when this rule asks for approval (the policy default otherwise)."""
 
     @field_validator("id")
     @classmethod
@@ -262,6 +276,8 @@ class Rule(_Model):
                 raise ValueError("then_exceeded only applies to budget rules")
         if (self.then == "delay") != (self.delay_seconds is not None):
             raise ValueError("a delay needs a duration, for example 'then: delay 60s'")
+        if self.approvals is not None and "require_approval" not in (self.then, self.then_exceeded):
+            raise ValueError("approvals only apply to a rule that asks for approval")
         return self
 
 
@@ -307,8 +323,8 @@ class Defaults(_Model):
     financial: Outcome = "require_approval"
 
 
-class ApprovalSettings(_Model):
-    """How approvals behave."""
+class ApprovalSettings(ApprovalRequirement):
+    """How approvals behave, and who must approve when a rule does not say."""
 
     wait_seconds: int = Field(default=0, ge=0, le=3600)
     expires_after: Duration = timedelta(minutes=15)

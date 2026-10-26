@@ -276,6 +276,9 @@ Start(w) ==
 Schedule(w) ==
     /\ pc[w] = "approved"
     /\ st[wk[w]] = "APPROVED"
+    \* Only a new intent gets a cancel window: the gate decides a delay for a
+    \* new intent only, and a retry that never had one needs approval instead.
+    /\ attempt[wk[w]] = 0
     /\ SetState(wk[w], "SCHEDULED")
     /\ moved' = {<<"APPROVED", "SCHEDULED">>}
     /\ Reset(w)
@@ -412,6 +415,28 @@ Refuse(k) ==
           /\ moved' = {<<"PENDING_APPROVAL", s>>}
     /\ UNCHANGED <<rowHash, apprHash, attempt, owner, expired, config, service, local>>
 
+(* A retry after a clean failure that the policy now holds for a human. *)
+RetryNeedsApproval(k) ==
+    /\ st[k] = "FAILED"
+    /\ ~MayHaveActed(k)
+    /\ attempt[k] < MaxAttempts   \* a retry needs an attempt left, as in Resume
+    /\ SetState(k, "PENDING_APPROVAL")
+    /\ moved' = {<<"FAILED", "PENDING_APPROVAL">>}
+    \* For a none tool that was UNKNOWN, a human approving the retry is an
+    \* explicit decision to run it again.
+    /\ retries' = IF mode[k] = "none" /\ wasUnknown[k]
+                    THEN [retries EXCEPT ![k] = @ + 1]
+                    ELSE retries
+    /\ UNCHANGED <<rowHash, apprHash, attempt, owner, expired, config, seen, effects,
+                   calls, local>>
+
+(* An approval nobody acted on in time goes stale; the action never runs. *)
+ApprovalStale(k) ==
+    /\ st[k] = "APPROVED"
+    /\ SetState(k, "EXPIRED")
+    /\ moved' = {<<"APPROVED", "EXPIRED">>}
+    /\ UNCHANGED <<rowHash, apprHash, attempt, owner, expired, config, service, local>>
+
 (* A human resolves an UNKNOWN none tool after checking the service. *)
 Resolve(k) ==
     /\ st[k] = "UNKNOWN"
@@ -437,7 +462,8 @@ Next ==
                             \/ Finish(w) \/ ProbeRead(w) \/ ProbeCommit(w) \/ Crash(w))
     \/ \E w \in Workers, k \in Keys : T(Fire(w, k))
     \/ \E k \in Keys : T(Cancel(k) \/ Expire(k) \/ RecoverStale(k)
-                         \/ Approve(k) \/ Refuse(k) \/ Resolve(k))
+                         \/ Approve(k) \/ Refuse(k) \/ Resolve(k)
+                         \/ RetryNeedsApproval(k) \/ ApprovalStale(k))
     \/ Done
 
 (* Workers, leases, the recovery sweep and the scheduler make progress. *)

@@ -13,6 +13,7 @@ from arbitr.core.redact import Redactor
 from arbitr.core.spec import ToolSpec
 from arbitr.core.states import IntentState
 from arbitr.policy.engine import BudgetCharge
+from arbitr.storage.migrations import SQLITE
 from arbitr.storage.sqlite import SQLiteStorage, parse_db_time
 
 if TYPE_CHECKING:
@@ -42,8 +43,8 @@ def approved(db: SQLiteStorage, args: dict[str, object] | None = None) -> str:
     return intent.intent_id
 
 
-def test_schema_version_is_four(db: SQLiteStorage) -> None:
-    assert db.schema_version() == 4
+def test_schema_version_is_current(db: SQLiteStorage) -> None:
+    assert db.schema_version() == len(SQLITE)
 
 
 def test_args_exact_tells_whether_stored_args_are_the_real_ones(db: SQLiteStorage) -> None:

@@ -72,6 +72,8 @@ class Case(_Model):
     counters: dict[str, float] = Field(default_factory=dict)
     mode: Literal["enforce", "shadow"] | None = None
     outbound_findings: tuple[str, ...] | None = None
+    preview: dict[str, Any] = Field(default_factory=dict)
+    preview_ok: bool = True
     expect: Verdict
     expect_rule: str | None = None
 
@@ -139,6 +141,8 @@ def gate_input(case: Case, policy: Policy) -> GateInput:
         outside_scope=case.outside_scope,
         outbound_findings=frozenset(findings),
         mode=case.mode,
+        preview=case.preview,
+        preview_ok=case.preview_ok,
     )
 
 

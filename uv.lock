@@ -73,6 +73,7 @@ all = [
     { name = "anthropic" },
     { name = "cryptography" },
     { name = "fastapi" },
+    { name = "keyring" },
     { name = "langgraph" },
     { name = "mcp" },
     { name = "openai-agents" },
@@ -90,6 +91,9 @@ anthropic = [
 cli = [
     { name = "rich" },
     { name = "typer" },
+]
+keyring = [
+    { name = "keyring" },
 ]
 langgraph = [
     { name = "langgraph" },
@@ -142,10 +146,11 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "anthropic", marker = "extra == 'anthropic'", specifier = ">=0.40" },
-    { name = "arbitr", extras = ["cli", "server", "postgres", "mcp", "anthropic", "openai-agents", "langgraph", "otel", "sql", "sign"], marker = "extra == 'all'" },
+    { name = "arbitr", extras = ["cli", "server", "postgres", "mcp", "anthropic", "openai-agents", "langgraph", "otel", "sql", "sign", "keyring"], marker = "extra == 'all'" },
     { name = "cryptography", marker = "extra == 'sign'", specifier = ">=43" },
     { name = "fastapi", marker = "extra == 'server'", specifier = ">=0.115" },
     { name = "google-re2", specifier = ">=1.1" },
+    { name = "keyring", marker = "extra == 'keyring'", specifier = ">=25" },
     { name = "langgraph", marker = "extra == 'langgraph'", specifier = ">=0.2" },
     { name = "mcp", marker = "extra == 'mcp'", specifier = ">=1.9" },
     { name = "openai-agents", marker = "extra == 'openai-agents'", specifier = ">=0.1" },
@@ -159,7 +164,7 @@ requires-dist = [
     { name = "typer", marker = "extra == 'cli'", specifier = ">=0.12" },
     { name = "uvicorn", marker = "extra == 'server'", specifier = ">=0.30" },
 ]
-provides-extras = ["cli", "server", "postgres", "mcp", "anthropic", "openai-agents", "langgraph", "otel", "sql", "sign", "all"]
+provides-extras = ["cli", "server", "postgres", "mcp", "anthropic", "openai-agents", "langgraph", "otel", "sql", "sign", "keyring", "all"]
 
 [package.metadata.requires-dev]
 dev = [
