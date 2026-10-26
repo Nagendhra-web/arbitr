@@ -52,7 +52,7 @@ import sys
 from dataclasses import dataclass
 from importlib.util import find_spec
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any, Final, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Final, Literal, Unpack
 from urllib.parse import urlsplit
 
 from pydantic import (
@@ -83,7 +83,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
     from arbitr.approvals import ApprovalNotifier
-    from arbitr.executor import Ledger
+    from arbitr.executor import Ledger, LedgerOptions
     from arbitr.policy.schema import Policy
 
 CONFIG_FILE: Final = "arbitr.yaml"
@@ -301,7 +301,7 @@ class Config(_Model):
         except PolicyError as exc:
             raise ConfigError(f"{where}: {exc}") from exc
 
-    def open_ledger(self, **options: Any) -> Ledger:  # noqa: ANN401 - passed to Ledger.open
+    def open_ledger(self, **options: Unpack[LedgerOptions]) -> Ledger:
         """Open (or create) the ledger with the policy, key and credentials from this config.
 
         ``options`` go to ``Ledger.open`` and win over the config.
@@ -311,7 +311,7 @@ class Config(_Model):
         """
         from arbitr.executor import Ledger  # noqa: PLC0415 - the executor imports this module
 
-        settings: dict[str, Any] = {
+        settings: LedgerOptions = {
             "worker_id": self.worker_id,
             "lease_ttl": self.lease_ttl,
             "approval_ttl": self.approval_ttl,
@@ -322,7 +322,8 @@ class Config(_Model):
         policy, key = self.load_policy(), self.key()
         try:
             self.ledger.parent.mkdir(parents=True, exist_ok=True)
-            return Ledger.open(self.ledger, policy, key=key, **{**settings, **options})
+            settings.update(options)  # options win over the config
+            return Ledger.open(self.ledger, policy, key=key, **settings)
         except (StorageError, OSError) as exc:
             where = f"{self._where('ledger')} {self.ledger}"
             raise ConfigError(f"{where} cannot be opened: {exc}") from exc

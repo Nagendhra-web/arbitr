@@ -1,7 +1,9 @@
 """Enforce per-package coverage floors from a coverage.py JSON report.
 
 At least 95% on core/, policy/, preview/, the executor and the credential providers (the
-overall 90% floor is enforced by pytest-cov). A package with no statements yet
+overall 90% floor is enforced by pytest-cov). With --with-integrations (the integration
+stage, whose coverage is appended to the unit stage's), also on the integrations and the
+guard decorator. A package with no statements yet
 is reported as such, so an empty package never looks like a covered one.
 """
 
@@ -18,12 +20,17 @@ FLOORS = {
     "src/arbitr/credentials.py": 95.0,
     "src/arbitr/preview/": 95.0,
 }
+INTEGRATION_FLOORS = {
+    "src/arbitr/integrations/": 95.0,
+    "src/arbitr/guarding.py": 95.0,
+}
 
 
-def main(report_path: str) -> int:
+def main(report_path: str, *, with_integrations: bool = False) -> int:
     files = json.loads(Path(report_path).read_text(encoding="utf-8"))["files"]
     failed = False
-    for prefix, floor in FLOORS.items():
+    floors = {**FLOORS, **INTEGRATION_FLOORS} if with_integrations else FLOORS
+    for prefix, floor in floors.items():
         stmts = covered = 0
         for name, data in files.items():
             if name.replace("\\", "/").startswith(prefix):
@@ -40,4 +47,4 @@ def main(report_path: str) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1]))
+    sys.exit(main(sys.argv[1], with_integrations="--with-integrations" in sys.argv[2:]))

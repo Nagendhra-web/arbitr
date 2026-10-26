@@ -75,6 +75,7 @@ all = [
     { name = "fastapi" },
     { name = "keyring" },
     { name = "langgraph" },
+    { name = "langgraph-prebuilt" },
     { name = "mcp" },
     { name = "openai-agents" },
     { name = "opentelemetry-api" },
@@ -97,6 +98,7 @@ keyring = [
 ]
 langgraph = [
     { name = "langgraph" },
+    { name = "langgraph-prebuilt" },
 ]
 mcp = [
     { name = "mcp" },
@@ -145,15 +147,16 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "anthropic", marker = "extra == 'anthropic'", specifier = ">=0.40" },
+    { name = "anthropic", marker = "extra == 'anthropic'", specifier = ">=2.3,<3" },
     { name = "arbitr", extras = ["cli", "server", "postgres", "mcp", "anthropic", "openai-agents", "langgraph", "otel", "sql", "sign", "keyring"], marker = "extra == 'all'" },
     { name = "cryptography", marker = "extra == 'sign'", specifier = ">=43" },
     { name = "fastapi", marker = "extra == 'server'", specifier = ">=0.115" },
     { name = "google-re2", specifier = ">=1.1" },
     { name = "keyring", marker = "extra == 'keyring'", specifier = ">=25" },
-    { name = "langgraph", marker = "extra == 'langgraph'", specifier = ">=0.2" },
+    { name = "langgraph", marker = "extra == 'langgraph'", specifier = ">=1.2,<2" },
+    { name = "langgraph-prebuilt", marker = "extra == 'langgraph'", specifier = ">=1.1,<1.2" },
     { name = "mcp", marker = "extra == 'mcp'", specifier = ">=1.9" },
-    { name = "openai-agents", marker = "extra == 'openai-agents'", specifier = ">=0.1" },
+    { name = "openai-agents", marker = "extra == 'openai-agents'", specifier = ">=0.24,<0.25" },
     { name = "opentelemetry-api", marker = "extra == 'otel'", specifier = ">=1.27" },
     { name = "psycopg", extras = ["binary"], marker = "extra == 'postgres'", specifier = ">=3.2" },
     { name = "psycopg-pool", marker = "extra == 'postgres'", specifier = ">=3.2" },

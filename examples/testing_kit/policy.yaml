@@ -1,0 +1,14 @@
+# The support bot's policy. Effects with no rule fall back to the defaults.
+version: 1
+default: { financial: allow }
+rules:
+  - id: no-destructive-sql
+    when: { tool: db.execute, effect: destructive }
+    then: deny
+    reason: Agents may not run destructive SQL.
+  - id: big-refunds
+    when:
+      tool: payments.refund
+      args: [{ path: "$.amount", op: gt, value: 100 }]
+    then: require_approval
+    reason: Refunds over 100 need a human.

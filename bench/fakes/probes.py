@@ -1,14 +1,7 @@
-"""Probe functions for the fake services, in the ``package.module:function`` form tools use."""
+"""Probe functions for the fake services: the same ones the testing kit ships."""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from arbitr.testing.fakes import find_refund
 
-if TYPE_CHECKING:
-    from arbitr.executor import ProbeCall
-
-
-def find_refund(call: ProbeCall) -> dict[str, object] | None:
-    """Ask FakePayments whether the refund for this intent already happened."""
-    service = call.context["payments"]
-    return service.find_refund(str(call.args["order_id"]), call.idempotency_key)  # type: ignore[no-any-return,attr-defined]
+__all__ = ["find_refund"]

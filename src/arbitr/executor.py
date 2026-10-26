@@ -53,7 +53,7 @@ from types import (
     MethodType,
     ModuleType,
 )
-from typing import TYPE_CHECKING, Any, Final, Literal, Self
+from typing import TYPE_CHECKING, Any, Final, Literal, Self, TypedDict, Unpack
 from urllib.parse import quote
 
 from arbitr.approvals import (
@@ -68,6 +68,7 @@ from arbitr.core.errors import (
     ActionDenied,
     ActionError,
     ActionScheduled,
+    AmbiguousToolError,
     ApprovalError,
     ApprovalPending,
     ApprovalRejected,
@@ -116,7 +117,7 @@ if TYPE_CHECKING:
     )
 
 S = IntentState
-AMBIGUOUS: Final = (TimeoutError, ConnectionError)
+AMBIGUOUS: Final = (TimeoutError, ConnectionError, AmbiguousToolError)
 """Failures after which the side effect may have happened: recorded as UNKNOWN."""
 
 _CURRENT: contextvars.ContextVar[RunHandle | None] = contextvars.ContextVar(
@@ -354,6 +355,26 @@ _CARD_TEXT_LIMIT: Final = 120
 _NO_WINDOW: Final = "This retry never had its cancel window, so it needs approval instead."
 
 
+class LedgerOptions(TypedDict, total=False):
+    """The keyword settings of ``Ledger.open`` (and ``Ledger.from_config``).
+
+    ``clock``, ``heartbeat`` and ``on_step`` are test seams (deterministic
+    simulation and crash injection); leave them at their defaults elsewhere.
+    """
+
+    worker_id: str | None
+    lease_ttl: float
+    approval_ttl: float | None
+    credentials: CredentialProvider | None
+    on_step: Callable[[str], None] | None
+    notifier: ApprovalNotifier | None
+    protected_paths: Sequence[str | os.PathLike[str]]
+    clock: Callable[[], datetime] | None
+    heartbeat: bool
+    preview_context: Mapping[str, object] | None
+    preview_timeout: float
+
+
 class Ledger:
     """The write-ahead ledger and gate in front of an agent's tools.
 
@@ -415,7 +436,9 @@ class Ledger:
         self._lock = threading.Lock()
 
     @classmethod
-    def open(cls, path: str | Path, policy: Policy, *, key: bytes, **options: Any) -> Ledger:  # noqa: ANN401
+    def open(
+        cls, path: str | Path, policy: Policy, *, key: bytes, **options: Unpack[LedgerOptions]
+    ) -> Ledger:
         """Open (or create) the ledger at ``path`` with ``policy``.
 
         Raises:
@@ -424,6 +447,21 @@ class Ledger:
         ledger = cls(path, policy, key=key, **options)
         ledger._storage()
         return ledger
+
+    @classmethod
+    def from_config(
+        cls, path: str | Path | None = None, **options: Unpack[LedgerOptions]
+    ) -> Ledger:
+        """Open the ledger described by ``arbitr.yaml`` (or ``path``, or ``ARBITR_CONFIG``).
+
+        ``options`` go to ``Ledger.open`` and win over the config.
+
+        Raises:
+            ConfigError: the config, policy, key or ledger is unusable.
+        """
+        from arbitr.config import load_config  # noqa: PLC0415 - config imports this module
+
+        return load_config(path).open_ledger(**options)
 
     def __enter__(self) -> Self:
         """Use the ledger as a context manager; closing releases every connection."""
@@ -1473,6 +1511,24 @@ def _stop_beat(stop: threading.Event, beat: threading.Thread) -> None:
     stop.set()
     if beat.is_alive():
         beat.join()
+
+
+def scrub_injected(value: object, injected: Mapping[str, object]) -> object:
+    """``value`` with the credentials in ``injected`` replaced, as the ledger does to results.
+
+    For integrations whose framework sees a tool's result before the ledger
+    does (and may log it). Never raises.
+    """
+    return _scrub(value, _secret_values(injected))
+
+
+def scrubbed_error(exc: BaseException, injected: Mapping[str, object]) -> BaseException:
+    """``exc`` as the caller may see it: credentials in ``injected`` scrubbed or replaced.
+
+    Returns ``exc`` itself when it shows no credential (its type kept, so the
+    ledger can still tell a timeout from a failure).
+    """
+    return _present(exc, _secret_values(injected), None)
 
 
 def _secret_values(kwargs: Mapping[str, object]) -> tuple[str, ...]:

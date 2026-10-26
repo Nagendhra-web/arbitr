@@ -224,7 +224,14 @@ s_fault_concurrency() {
 s_integrations() {
   suites_ready integration:tests/integration mcp:tests/mcp || return 1
   [ "$STAGE_PENDING" -eq 1 ] && return 0
-  pytest_run "${READY_DIRS[@]}" -q
+  # In the full pipeline, coverage is appended to the unit stage's data, so the
+  # adapters' floors are checked against both suites together.
+  local cov=()
+  [ "$MODE" = "full" ] && cov=(--cov=arbitr --cov-append --cov-report=json:ci-logs/coverage.json)
+  pytest_run "${READY_DIRS[@]}" -q "${cov[@]}" || return 1
+  if [ "$MODE" = "full" ]; then
+    uv run --locked python scripts/check_coverage.py ci-logs/coverage.json --with-integrations || return 1
+  fi
 }
 
 # For stages with one entry point: run it if it exists, else the stage must be pending.

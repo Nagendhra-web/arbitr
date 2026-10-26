@@ -19,7 +19,13 @@ nav:
   - Policy reference: policy-reference.md
   - Blast radius previews: previews.md
   - Recovery: recovery.md
-  - Integrations: integrations/index.md
+  - Integrations:
+      - Overview: integrations/index.md
+      - Decorator: integrations/decorator.md
+      - Anthropic: integrations/anthropic.md
+      - OpenAI Agents: integrations/openai-agents.md
+      - LangGraph: integrations/langgraph.md
+  - Testing your agent: testing.md
   - Operations: operations/index.md
   - Threat model: THREAT_MODEL.md
   - Design:

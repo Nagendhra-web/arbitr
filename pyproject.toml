@@ -33,9 +33,9 @@ cli = ["typer>=0.12", "rich>=13.7"]
 server = ["fastapi>=0.115", "uvicorn>=0.30"]
 postgres = ["psycopg[binary]>=3.2", "psycopg-pool>=3.2"]
 mcp = ["mcp>=1.9"]
-anthropic = ["anthropic>=0.40"]
-openai-agents = ["openai-agents>=0.1"]
-langgraph = ["langgraph>=0.2"]
+anthropic = ["anthropic>=2.3,<3"]
+openai-agents = ["openai-agents>=0.24,<0.25"]
+langgraph = ["langgraph>=1.2,<2", "langgraph-prebuilt>=1.1,<1.2"]
 otel = ["opentelemetry-api>=1.27"]
 sql = ["sqlglot>=25"]
 sign = ["cryptography>=43"]
@@ -46,6 +46,9 @@ all = [
 
 [project.scripts]
 arbitr = "arbitr.cli.main:main"
+
+[project.entry-points.pytest11]
+arbitr = "arbitr.testing.plugin"
 
 [project.urls]
 Homepage = "https://github.com/nagendhra-web/arbitr"
@@ -107,10 +110,16 @@ max-complexity = 10
 [tool.ruff.lint.pydocstyle]
 convention = "google"
 
+[tool.ruff.lint.isort]
+# The OpenAI Agents SDK imports as "agents"; never let a local folder of that
+# name make it look first-party.
+known-third-party = ["agents"]
+
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101", "D", "ANN401", "PLR2004", "FBT", "S603", "S607", "TC", "INP001"]
 "tests/simulation/run.py" = ["T20"]
 "bench/**" = ["D", "T20", "PLR2004"]
+"examples/**" = ["T20", "INP001", "S101", "PLR2004", "D100", "D103"]  # examples print, and the sample suite asserts
 "scripts/**" = ["D", "T20", "S101", "S603", "S607", "INP001"]
 "noxfile.py" = ["D", "INP001"]
 "src/arbitr/cli/**" = ["FBT", "B008", "PLR0913", "PLR0917"]  # commands take one argument per option

@@ -154,6 +154,54 @@ All notable changes to this project are recorded here. The format follows
   stricter. The redacted preview is stored in the audit chain and read back
   with `Ledger.preview_of`. Tools can name their own previewer with
   `ToolSpec.preview`.
+- Framework integrations, each a thin layer over `Ledger.execute` that turns a
+  stop into a tool result the model can act on:
+  - `@guard(ledger, spec)` for sync and async functions, with
+    `from arbitr import Ledger, ToolSpec, guard` and `Ledger.from_config()`.
+  - Anthropic SDK: `guard_tools` for the tool runner, and `tool_results` /
+    `atool_results` for a hand-written loop.
+  - OpenAI Agents SDK: `guarded_function_tool` in place of `function_tool`.
+    Tool errors are recorded as failures before the model sees them, so a
+    retry can run again.
+  - LangGraph: `guarded_tool_node`, a prebuilt `ToolNode` with the gate in its
+    `wrap_tool_call` hooks. Each thread is one ledger run, and a thread keeps
+    the principal it started with.
+  - The model never sees or sets `idempotency_key` or `credentials`, and a
+    tool without a spec counts as a write. Every adapter refuses, when it
+    wraps a tool, one that cannot take the key or credentials its spec needs.
+  - LangGraph: the ledger's key and credentials reach tools that mark them
+    `InjectedToolArg`; the inner node never handles tool errors, so a timeout
+    is an unknown outcome, not a failure, and `handle_tool_errors` applies
+    after the ledger recorded it. The principal comes from the app (a name or
+    a function of the config), never from client config, and runs are per
+    agent and thread. Artifacts and state updates are scrubbed of credentials.
+  - OpenAI Agents: credentials never pass through the SDK's input, schema or
+    logs, and strict mode works with credentialed tools.
+  - `Ledger.open`, `Ledger.from_config` and `Config.open_ledger` take typed
+    options (`LedgerOptions`); a fixed `step_id` on a tool that allows
+    duplicates is refused.
+  - If a framework ever runs a tool around the values Arbitr injects, the
+    outcome is recorded as unknown (LangGraph) or the tool does not run at
+    all (OpenAI Agents). The integration extras are pinned to the tested SDK
+    ranges.
+  - LangGraph tools that get credentials have their results and errors
+    scrubbed inside the tool, so tracing callbacks never see a credential.
+  - Every adapter validates the model's arguments with the tool's own types
+    before the gate, so the policy, the ledger and the tool see the same
+    values (`"42"` is checked as `42`); arguments that do not fit are refused
+    with a message for the model and never run.
+- Testing kit (`arbitr.testing`) with a pytest plugin: `arbitr_policy`,
+  `arbitr_ledger` and `arbitr_run` fixtures; `assert_no_effect`,
+  `assert_denied`, `assert_needs_approval`, `assert_exactly_once` and
+  `assert_not_run`; `FakeTool` and `FakePayments`; `crash_at` and `restart` to
+  test a tool's idempotency through a worker crash; and scripted models for
+  each framework so an agent loop runs offline.
+- Examples for every integration, all runnable offline, and a sample test
+  suite in `examples/testing_kit/`. The public API is described in
+  `docs/design/api.md`, whose examples run in CI.
+- CI: the integration stage runs under coverage, merged with the unit stage,
+  with a 95% floor for the integrations and the decorator, and a crash test
+  matrix through every integration.
 - Repository scaffold, packaging with optional extras, local CI pipeline
   (`make ci`, `make ci-fast`, `make ci-docker`, `make act`), pinned CI Docker
   image, Postgres compose file for tests, git hooks that enforce owner

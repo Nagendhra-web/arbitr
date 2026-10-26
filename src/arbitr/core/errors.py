@@ -182,6 +182,16 @@ class UnknownOutcome(ActionError):
         )
 
 
+class AmbiguousToolError(ArbitrError, RuntimeError):
+    """A tool may have acted in a way that cannot be checked: the ledger records UNKNOWN.
+
+    Integrations raise it when a framework ran a tool without the values the
+    ledger meant to inject, so a native tool may have acted without its key.
+    """
+
+    code = "ambiguous_tool"
+
+
 class ScrubbedToolError(Exception):
     """A tool error whose text showed an injected credential, replaced by a safe copy.
 

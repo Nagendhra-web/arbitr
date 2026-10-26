@@ -146,8 +146,19 @@ recorded in an audit chain that `verify()` checks.
   - Credentials injected only after the gate allows the call, and scrubbed from
     everything the agent sees.
   - Details in [docs/recovery.md](docs/recovery.md).
-- **A CLI for policies:** `arbitr policy test`, `lint`, `packs` and `schema`.
-  Install the CLI with `pip install "arbitr[cli] @ git+https://github.com/Nagendhra-web/arbitr"`.
+- **Approvals:** bound to the exact arguments, expiring, with quorum, roles
+  and approvers kept apart from the person the agent acts for. Signed one-tap
+  links, a webhook channel and blast radius previews on every approval card.
+- **Integrations:** a `@guard` decorator, and adapters for the Anthropic SDK,
+  the OpenAI Agents SDK and LangGraph. See
+  [docs/integrations](docs/integrations/index.md).
+- **A testing kit:** a pytest plugin with fixtures, assertions such as
+  `assert_no_effect(run, "destructive")`, fakes and crash injection, so your
+  own CI can prove what your agent cannot do. See [docs/testing.md](docs/testing.md).
+- **A CLI:** `arbitr init`, `config check`, `approvals`, `runs`, `intents`,
+  `recover`, `verify`, `export`, and `policy test`, `lint`, `packs` and
+  `schema`. Install the CLI with
+  `pip install "arbitr[cli] @ git+https://github.com/Nagendhra-web/arbitr"`.
 
 Recovery depends on what the tool can promise:
 
@@ -159,9 +170,8 @@ Recovery depends on what the tool can promise:
 
 ## Coming next
 
-Approvals from the command line and the web, a `@guard` decorator, adapters for
-the Anthropic SDK, OpenAI Agents SDK and LangGraph, an MCP proxy, a shadow
-report and local dashboard, Postgres and an HTTP API.
+An MCP proxy (so Claude Code, Cursor and other MCP clients go through Arbitr),
+Slack approvals, a shadow report and local dashboard, Postgres and an HTTP API.
 
 ## How it is tested
 
