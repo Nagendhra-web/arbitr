@@ -19,6 +19,13 @@ else
   range="HEAD"
 fi
 
+# Commits made outside the local hooks (an edit in GitHub's web editor) are
+# listed with a reason. They must still be authored with the owner's email;
+# only the name, committer and message checks are skipped for them.
+exceptions="$(git rev-parse --show-toplevel)/scripts/commit-exceptions.txt"
+excepted() {
+  [ -f "$exceptions" ] && grep -qE "^$1([[:space:]]|$)" "$exceptions"
+}
 tmp="$(mktemp)"
 trap 'rm -f "$tmp"' EXIT
 bad=0
@@ -26,6 +33,13 @@ count=0
 while read -r sha; do
   count=$((count + 1))
   IFS=$'\t' read -r an ae cn ce < <(git log -1 --format='%an%x09%ae%x09%cn%x09%ce' "$sha")
+  if excepted "$sha"; then
+    if [ "${ae,,}" != "$ARBITR_OWNER_EMAIL" ]; then
+      echo "$sha: listed in commit-exceptions.txt but not authored with the owner's email" >&2
+      bad=1
+    fi
+    continue
+  fi
   if [ "${an,,}" != "$ARBITR_OWNER_NAME" ] || [ "${cn,,}" != "$ARBITR_OWNER_NAME" ]; then
     echo "$sha: author \"$an\" / committer \"$cn\" is not $ARBITR_OWNER_NAME" >&2
     bad=1

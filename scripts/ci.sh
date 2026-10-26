@@ -140,7 +140,7 @@ s_lint() { uv run --locked ruff check . && uv run --locked ruff format --check .
 
 s_types() { uv run --locked mypy --strict; }
 
-s_writing() { bash scripts/check_no_em_dash.sh; }
+s_writing() { bash scripts/check_typography.sh; }
 
 s_git_rules() {
   if [ "$HAS_COMMITS" -eq 0 ]; then
@@ -276,7 +276,7 @@ echo "Arbitr local CI (${MODE}) at ${SHA}, tree clean: ${TREE_CLEAN}, container:
 run_stage "Dependencies (uv sync --locked)" s_deps
 run_stage "Lint and format (ruff)" s_lint
 run_stage "Types (mypy --strict)" s_types
-run_stage "Writing rule (no em dashes)" s_writing
+run_stage "Writing rules (typography)" s_writing
 if [ "$MODE" = "fast" ]; then
   run_stage "Unit, property, repo, doc tests" s_unit
   finish 0

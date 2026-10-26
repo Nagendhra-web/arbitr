@@ -1,0 +1,4 @@
+# Commits the history check accepts although they were made outside the local
+# hooks (for example in GitHub's web editor). One full commit id per line, then
+# the reason. The author email must still be the owner's.
+566513349c9a4ceb3b64202ecfd4b9959d7f7f7c  the owner's edit of CONTRIBUTING.md in GitHub's web editor

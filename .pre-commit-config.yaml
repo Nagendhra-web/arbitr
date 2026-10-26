@@ -30,9 +30,9 @@ repos:
         entry: uv run --locked check-added-large-files --maxkb=500
         language: system
         exclude: ^uv\.lock$  # the lock file is large by nature and must be committed
-      - id: no-em-dash
-        name: no em dashes
-        entry: bash scripts/check_no_em_dash.sh
+      - id: typography
+        name: typography
+        entry: bash scripts/check_typography.sh
         language: system
         types: [text]
       - id: gitleaks

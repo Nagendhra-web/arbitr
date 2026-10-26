@@ -240,19 +240,19 @@ def test_pre_push_guard_blocks_when_pushed_commit_unknown(tmp_path: Path) -> Non
     assert "cannot tell" in result.stderr
 
 
-# ---------------------------------------------------------------- em dash check
+# ---------------------------------------------------------------- typography check
 
 
-def test_em_dash_check_flags_a_file(tmp_path: Path) -> None:
+def test_typography_check_flags_a_file(tmp_path: Path) -> None:
     bad = tmp_path / "bad.md"
     bad.write_text("one " + chr(0x2014) + " two\n", encoding="utf-8")
     good = tmp_path / "good.md"
     good.write_text("one, two\n", encoding="utf-8")
-    assert run_script("check_no_em_dash.sh", str(bad)).returncode == 1
-    assert run_script("check_no_em_dash.sh", str(good)).returncode == 0
+    assert run_script("check_typography.sh", str(bad)).returncode == 1
+    assert run_script("check_typography.sh", str(good)).returncode == 0
 
 
-def test_em_dash_check_fails_closed_when_grep_errors(tmp_path: Path) -> None:
+def test_typography_check_fails_closed_when_grep_errors(tmp_path: Path) -> None:
     fake = tmp_path / "bin"
     fake.mkdir()
     grep = fake / "grep"
@@ -261,15 +261,15 @@ def test_em_dash_check_fails_closed_when_grep_errors(tmp_path: Path) -> None:
     good = tmp_path / "good.md"
     good.write_text("one, two\n", encoding="utf-8")
     # Prepend the fake grep from inside bash, so PATH stays in bash's own format.
-    script = str(SCRIPTS / "check_no_em_dash.sh")
+    script = str(SCRIPTS / "check_typography.sh")
     prepend = 'PATH="$(cd "$1" && pwd):$PATH"; shift; exec bash "$@"'
     result = run_bash(["-c", prepend, "_", str(fake), script, str(good)])
     assert result.returncode == 2, result.stdout + result.stderr
     assert "Failing closed" in result.stderr
 
 
-def test_em_dash_check_passes_on_repo() -> None:
-    result = run_script("check_no_em_dash.sh")
+def test_typography_check_passes_on_repo() -> None:
+    result = run_script("check_typography.sh")
     assert result.returncode == 0, result.stdout + result.stderr
 
 
@@ -277,3 +277,41 @@ def test_owner_identity_matches_shellutil() -> None:
     owner = (Path(__file__).resolve().parents[2] / "scripts" / "lib" / "owner.sh").read_text()
     assert f'ARBITR_OWNER_NAME="{OWNER_NAME}"' in owner
     assert f'ARBITR_OWNER_EMAIL="{OWNER_EMAIL}"' in owner
+
+
+def _web_edit(repo: Path, email: str) -> str:
+    """A commit like one from GitHub's web editor: another name, GitHub as committer."""
+    (repo / "x.txt").write_text("x\n", encoding="utf-8")
+    git(repo, "add", "x.txt")
+    env = {
+        "GIT_AUTHOR_NAME": "Owner Full Name",
+        "GIT_AUTHOR_EMAIL": email,
+        "GIT_COMMITTER_NAME": "GitHub",
+        "GIT_COMMITTER_EMAIL": "noreply@github.com",
+    }
+    git(repo, "commit", "-q", "-m", "Update x.txt", env=env)
+    return git(repo, "rev-parse", "HEAD").strip()
+
+
+def test_check_commits_accepts_a_listed_web_edit(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path / "r")
+    sha = _web_edit(repo, OWNER_EMAIL)
+    assert run_script("check_commits.sh", cwd=repo, env=clean_env()).returncode == 1
+    (repo / "scripts").mkdir(exist_ok=True)
+    (repo / "scripts" / "commit-exceptions.txt").write_text(
+        f"{sha}  a web edit\n", encoding="utf-8"
+    )
+    result = run_script("check_commits.sh", cwd=repo, env=clean_env())
+    assert result.returncode == 0, result.stderr
+
+
+def test_check_commits_still_needs_the_owner_email_for_a_listed_commit(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path / "r")
+    sha = _web_edit(repo, "someone@example.com")
+    (repo / "scripts").mkdir(exist_ok=True)
+    (repo / "scripts" / "commit-exceptions.txt").write_text(
+        f"{sha}  a web edit\n", encoding="utf-8"
+    )
+    result = run_script("check_commits.sh", cwd=repo, env=clean_env())
+    assert result.returncode == 1
+    assert "owner's email" in result.stderr

@@ -232,6 +232,6 @@ All notable changes to this project are recorded here. The format follows
 - CI records no longer overwrite each other (one file per run
   kind), PENDING can only come from the pending list, skips fail CI, the
   push guard requires a clean tree and HEAD as the pushed commit, identity
-  checks cover emails and environment overrides, the em dash check fails
+  checks cover emails and environment overrides, the typography check fails
   closed, TLC keeps deadlock checking with a 2 minute limit, and `make act`
   keeps its log.
