@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "notes": {
+      "type": "stdio",
+      "command": "arbitr",
+      "args": ["mcp-proxy", "--server", "notes", "--upstream", "python notes_server.py",
+               "--upstream-env", "NOTES_EVIL"]
+    }
+  }
+}

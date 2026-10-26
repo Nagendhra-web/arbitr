@@ -112,6 +112,9 @@ if TYPE_CHECKING:
         IntentRow,
         ReceiptRow,
         RunRow,
+        ToolCandidateRow,
+        ToolPinRow,
+        ToolSeen,
         Transaction,
         VoteRow,
     )
@@ -307,6 +310,9 @@ def _counted_only(tx: Transaction, charges: tuple[BudgetCharge, ...]) -> tuple[B
     return tuple(
         dataclasses.replace(c, limit=max(c.limit, current[c.scope_key] + c.amount)) for c in charges
     )
+
+
+_TAINT_LOST = "the tool was called and failed, but the ledger could not record it or its taint"
 
 
 def _taint_run(tx: Transaction, run_id: str, spec: ToolSpec) -> None:
@@ -1056,11 +1062,12 @@ class Ledger:
         kwargs = {}  # no credential stays in this frame for a traceback to show
         if failure is not None:
             safe = _present(failure, secrets, outer)
-            error = _as_outcome(
-                failure, safe, ambiguous=self._finish_error(plan, failure, called=called)
-            )
+            ambiguous, taint_lost = self._finish_error(handle, spec, plan, failure, called=called)
+            error = _as_outcome(failure, safe, ambiguous=ambiguous)
             secrets, failure = (), None
             del safe
+            if taint_lost:
+                raise LedgerUnavailable(_TAINT_LOST)
             raise error  # outside the except block, so nothing unscrubbed is attached
         self._step("after_side_effect")
         # Scrubbing happens after the outcome is known: it never raises, and a
@@ -1098,10 +1105,14 @@ class Ledger:
             # is running: from a worker thread, clearing its suspended frame would
             # close it. Only the ledger write goes to a thread.
             safe = _present(failure, secrets, outer)
-            ambiguous = await asyncio.to_thread(self._finish_error, plan, failure, called=called)
+            ambiguous, taint_lost = await asyncio.to_thread(
+                self._finish_error, handle, spec, plan, failure, called=called
+            )
             error = _as_outcome(failure, safe, ambiguous=ambiguous)
             secrets, failure = (), None
             del safe
+            if taint_lost:
+                raise LedgerUnavailable(_TAINT_LOST)
             raise error  # outside the except block, so nothing unscrubbed is attached
         self._step("after_side_effect")
         result, raw = _scrub(raw, secrets), None
@@ -1187,12 +1198,23 @@ class Ledger:
         except StorageError as exc:
             raise LedgerUnavailable("the action ran, but its taint could not be recorded") from exc
 
-    def _finish_error(self, plan: _Plan, exc: BaseException, *, called: bool = True) -> bool:
+    def _finish_error(
+        self,
+        handle: RunHandle,
+        spec: ToolSpec,
+        plan: _Plan,
+        exc: BaseException,
+        *,
+        called: bool = True,
+    ) -> tuple[bool, bool]:
         """The tool raised: FAILED (budgets released) or UNKNOWN when it may have run.
 
         A failure before the tool was called (a credential fetch, a lost lease)
-        is always FAILED: nothing can have happened yet. Returns True when the
-        outcome was recorded as UNKNOWN.
+        is always FAILED: nothing can have happened yet. A tool that was called
+        taints the run like a result would: its error text reaches the agent
+        too. Returns whether the outcome was recorded as UNKNOWN, and whether
+        the taint could not be recorded (the caller then fails closed). It
+        never raises: the caller's frame still holds the credentials.
         """
         ambiguous = called and (isinstance(exc, AMBIGUOUS) or not isinstance(exc, Exception))
         target = S.UNKNOWN if ambiguous else S.FAILED
@@ -1208,9 +1230,19 @@ class Ledger:
                 )  # fmt: skip
                 if target == S.FAILED:
                     tx.release_reservations(plan.intent.intent_id)
+                if called:
+                    _taint_run(tx, handle.run_id, spec)
         except (StorageError, StaleStateError):
-            return False  # recovery will find the expired lease
-        return ambiguous
+            # Recovery will find the expired lease. The error still reaches the
+            # agent, so its taint must be kept on its own.
+            if not called:
+                return False, False
+            try:
+                self._taint_only(handle, spec)
+            except LedgerUnavailable:
+                return False, True
+            return False, False
+        return ambiguous, False
 
     # ------------------------------------------------------------ operations
 
@@ -1427,6 +1459,47 @@ class Ledger:
             self.notifier.notify(self, approval, self.approval_card(approval.approval_id))
 
     # ------------------------------------------------------------ reading
+
+    # ------------------------------------------------------------ MCP tool pins
+
+    def see_tool(self, server: str, tool: str, definition: Mapping[str, object]) -> ToolSeen:
+        """Record a tool definition an MCP server lists; say if it is the pinned one."""
+        with self._storage().transaction() as tx:
+            return tx.see_tool(server, tool, definition)
+
+    def accept_tool(
+        self, server: str, tool: str, *, accepted_by: str, definition_hash: str | None = None
+    ) -> ToolPinRow:
+        """Pin the held new or changed definition of an MCP tool."""
+        with self._storage().transaction() as tx:
+            return tx.accept_tool(
+                server, tool, accepted_by=accepted_by, definition_hash=definition_hash
+            )
+
+    def accept_tools(
+        self, server: str, hashes: Mapping[str, str], *, accepted_by: str
+    ) -> list[ToolPinRow]:
+        """Pin several held definitions, each by its hash, in one transaction: all or none.
+
+        Raises:
+            StorageError: a tool has nothing held, or its held definition is not
+                the given hash; nothing is pinned then.
+        """
+        with self._storage().transaction() as tx:
+            return [
+                tx.accept_tool(server, tool, accepted_by=accepted_by, definition_hash=digest)
+                for tool, digest in hashes.items()
+            ]
+
+    def tool_pins(self, server: str | None = None) -> list[ToolPinRow]:
+        """Accepted MCP tool definitions."""
+        with self._storage().transaction() as tx:
+            return tx.tool_pins(server)
+
+    def tool_candidates(self, server: str | None = None) -> list[ToolCandidateRow]:
+        """New or changed MCP tool definitions waiting to be accepted."""
+        with self._storage().transaction() as tx:
+            return tx.tool_candidates(server)
 
     def runs(self, *, limit: int = 50) -> list[RunRow]:
         """The most recent runs, newest first."""

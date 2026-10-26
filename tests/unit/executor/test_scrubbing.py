@@ -7,12 +7,13 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from arbitr.core.errors import ScrubbedToolError, UnknownOutcome
+from arbitr.core.errors import LedgerUnavailable, ScrubbedToolError, StorageError, UnknownOutcome
 from arbitr.core.spec import ToolSpec
 from arbitr.core.states import IntentState
 from arbitr.credentials import EnvCredentials
 from arbitr.executor import Ledger, current_run
 from arbitr.policy.schema import load_policy
+from arbitr.storage import sqlite
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -61,20 +62,20 @@ def leaks(exc: BaseException) -> list[str]:
     return found
 
 
-def call(ledger: Ledger, tool: Callable[..., object]) -> BaseException:
+def call(ledger: Ledger, tool: Callable[..., object], spec: ToolSpec = SPEC) -> BaseException:
     with ledger.run("alice", "bot"):
         try:
-            ledger.execute(SPEC, ARGS, tool)
+            ledger.execute(spec, ARGS, tool)
         except BaseException as exc:  # noqa: BLE001 - the test inspects what came back
             return exc
     raise AssertionError("the call did not raise")
 
 
-def acall(ledger: Ledger, tool: Callable[..., object]) -> BaseException:
+def acall(ledger: Ledger, tool: Callable[..., object], spec: ToolSpec = SPEC) -> BaseException:
     async def go() -> BaseException:
         with ledger.run("alice", "bot"):
             try:
-                await ledger.aexecute(SPEC, ARGS, tool)
+                await ledger.aexecute(spec, ARGS, tool)
             except BaseException as exc:  # noqa: BLE001 - the test inspects what came back
                 return exc
         raise AssertionError("the call did not raise")
@@ -125,6 +126,59 @@ def test_no_traceback_frame_holds_the_credential(
     exc = runner(ledger, tool)
     assert isinstance(exc, ValueError)
     assert leaks(exc) == []
+
+
+UNTRUSTED = ToolSpec(
+    name="payments.refund", effect="financial", credentials=("stripe",), untrusted_output=True
+)
+
+
+def _fail_outcome_writes(monkeypatch: pytest.MonkeyPatch, *, taint_too: bool) -> None:
+    """The ledger cannot record FAILED or UNKNOWN (and, with ``taint_too``, the taint)."""
+    transition = sqlite.Transaction.transition
+
+    def no_outcome(
+        self: object, intent_id: str, target: IntentState, *a: object, **k: object
+    ) -> object:
+        if target in (IntentState.FAILED, IntentState.UNKNOWN):
+            raise StorageError("disk full")
+        return transition(self, intent_id, target, *a, **k)  # type: ignore[arg-type]
+
+    def no_taint(self: object, *a: object, **k: object) -> None:
+        raise StorageError("disk full")
+
+    monkeypatch.setattr(sqlite.Transaction, "transition", no_outcome)
+    if taint_too:
+        monkeypatch.setattr(sqlite.Transaction, "add_taint", no_taint)
+
+
+@pytest.mark.parametrize(("runner", "tool"), [(call, fails_plainly), (acall, async_fails_plainly)])
+def test_a_lost_taint_write_fails_closed_without_the_credential(
+    ledger: Ledger,
+    monkeypatch: pytest.MonkeyPatch,
+    runner: Callable[..., BaseException],
+    tool: Callable[..., object],
+) -> None:
+    _fail_outcome_writes(monkeypatch, taint_too=True)
+    exc = runner(ledger, tool, UNTRUSTED)
+    assert isinstance(exc, LedgerUnavailable)
+    assert "the action ran" not in str(exc)
+    assert leaks(exc) == []
+
+
+@pytest.mark.parametrize(("runner", "tool"), [(call, fails_plainly), (acall, async_fails_plainly)])
+def test_a_lost_outcome_write_still_taints_the_run(
+    ledger: Ledger,
+    monkeypatch: pytest.MonkeyPatch,
+    runner: Callable[..., BaseException],
+    tool: Callable[..., object],
+) -> None:
+    _fail_outcome_writes(monkeypatch, taint_too=False)
+    exc = runner(ledger, tool, UNTRUSTED)
+    assert isinstance(exc, ValueError)
+    assert leaks(exc) == []
+    (row,) = ledger.find_intents(tool="payments.refund")
+    assert ledger.run_record(row.run_id).taint.untrusted_input  # type: ignore[union-attr]
 
 
 def test_async_errors_that_cannot_be_scrubbed_are_replaced(ledger: Ledger) -> None:

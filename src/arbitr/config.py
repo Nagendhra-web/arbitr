@@ -46,6 +46,7 @@ Example:
 from __future__ import annotations
 
 import os
+import re
 import secrets
 import stat
 import sys
@@ -77,6 +78,7 @@ from arbitr.credentials import (
     FileCredentials,
     KeyringCredentials,
 )
+from arbitr.integrations.mcp_specs import ServerSettings
 from arbitr.policy.schema import format_errors, load_policy, load_yaml, parse_duration
 
 if TYPE_CHECKING:
@@ -212,6 +214,58 @@ class ApprovalsConfig(_Model):
                                approver_urls=self.approver_webhooks)  # fmt: skip
 
 
+_SERVER_NAME: Final = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+_SHA256: Final = re.compile(r"^[0-9a-fA-F]{64}$")
+
+
+class McpToken(_Model):
+    """One HTTP bearer token for the MCP proxy, stored only as its SHA-256."""
+
+    principal: str = Field(min_length=1, max_length=256)
+    sha256: str
+    agent_id: str | None = Field(default=None, min_length=1, max_length=128)
+    """The agent this token's calls run as (else ``mcp.agent_id``, else ``mcp-proxy:<server>``)."""
+
+    @field_validator("sha256")
+    @classmethod
+    def _check_hash(cls, value: str) -> str:
+        if not _SHA256.match(value):
+            raise ValueError("must be the 64 hex digits of the token's SHA-256, not the token")
+        return value.lower()
+
+
+class McpConfig(_Model):
+    """How the MCP proxy runs: who calls act for, and how tool changes are handled."""
+
+    principal: str | None = Field(default=None, min_length=1, max_length=256)
+    """Who the agent acts for over stdio (``ARBITR_PRINCIPAL`` overrides it)."""
+    agent_id: str | None = Field(default=None, min_length=1, max_length=128)
+    on_tool_change: Literal["deny", "require_approval", "allow"] = "require_approval"
+    call_timeout: Seconds = 60.0
+    servers: dict[str, ServerSettings] = Field(default_factory=dict)
+    http_tokens: tuple[McpToken, ...] = ()
+
+    @field_validator("servers")
+    @classmethod
+    def _check_names(cls, value: dict[str, ServerSettings]) -> dict[str, ServerSettings]:
+        for name in value:
+            if not _SERVER_NAME.match(name):
+                raise ValueError(f"server name {name!r}: use letters, digits, '.', '_' or '-'")
+        return value
+
+    def settings_for(self, server: str) -> ServerSettings:
+        """The settings for one server (defaults when the config names none)."""
+        return self.servers.get(server, ServerSettings())
+
+    def tokens(self) -> dict[str, str]:
+        """Token hashes to principals."""
+        return {token.sha256: token.principal for token in self.http_tokens}
+
+    def token_agents(self) -> dict[str, str]:
+        """Token hashes to the agent ids their tokens name."""
+        return {t.sha256: t.agent_id for t in self.http_tokens if t.agent_id is not None}
+
+
 class Config(_Model):
     """A validated configuration. Build it with ``load_config``."""
 
@@ -225,6 +279,7 @@ class Config(_Model):
     """How long an approval request stays open; None means the policy's approval.expires_after."""
     credentials: tuple[Annotated[CredentialSource, BeforeValidator(_source)], ...] = (EnvSource(),)
     approvals: ApprovalsConfig = ApprovalsConfig()
+    mcp: McpConfig = McpConfig()
 
     _source: Path | None = PrivateAttr(default=None)
     _key_hex: str | None = PrivateAttr(default=None)

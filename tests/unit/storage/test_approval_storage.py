@@ -55,7 +55,7 @@ def state(db: SQLiteStorage, intent_id: str) -> IntentState:
 
 
 def test_schema_version_is_current(db: SQLiteStorage) -> None:
-    assert db.schema_version() == len(SQLITE) == 5
+    assert db.schema_version() == len(SQLITE) == 6
 
 
 def test_one_approval_moves_the_intent_to_approved(db: SQLiteStorage) -> None:

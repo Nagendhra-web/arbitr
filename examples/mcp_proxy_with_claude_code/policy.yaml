@@ -1,0 +1,9 @@
+# The notes server's policy: reads and notes are fine, deleting everything is not.
+version: 1
+include: [mcp-basics]
+default: { read: allow, write: allow }
+rules:
+  - id: no-mass-delete
+    when: { tool: "mcp:notes/delete_all_notes" }
+    then: deny
+    reason: Agents may not delete every note.

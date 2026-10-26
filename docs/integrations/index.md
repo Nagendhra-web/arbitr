@@ -11,6 +11,7 @@ The agent keeps running; the action simply did not happen.
 | Anthropic SDK | `guard_tools(ledger, tools, specs)` with the tool runner, or `tool_results(...)` in your own loop | [Anthropic](anthropic.md) |
 | OpenAI Agents SDK | `@guarded_function_tool(ledger, spec)` in place of `@function_tool` | [OpenAI Agents](openai-agents.md) |
 | LangGraph | `guarded_tool_node(ledger, tools, specs)` in place of `ToolNode(tools)` | [LangGraph](langgraph.md) |
+| MCP clients (Claude Code, Cursor, ...) | `arbitr mcp-proxy` in front of an MCP server | [MCP proxy](mcp-proxy.md) |
 
 Every example in `examples/` runs offline with a scripted model, so you can
 try them without an API key. To test your own agent the same way, see
@@ -51,5 +52,6 @@ written for the model, for example:
 Blocked by policy 'no-destructive-sql': Agents may not run destructive SQL. Do not retry. Ask the user.
 ```
 
-The MCP proxy, which covers MCP clients such as Claude Code and Cursor, gets
-its own page when it lands.
+The MCP proxy works the same way, with one difference: it runs as its own
+process, so the run is one per client connection and the principal comes
+from the config (or, over HTTP, from the client's token).

@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import platform
 import sys
+from importlib.util import find_spec
 from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn
 
@@ -70,6 +71,10 @@ def _build_app() -> typer.Typer:
     from arbitr.cli.ops import register  # noqa: PLC0415 - needs the cli extra
 
     register(app)
+    if find_spec("mcp") is not None:  # the mcp extra
+        from arbitr.cli.mcp import register as register_mcp  # noqa: PLC0415
+
+        register_mcp(app)
     return app
 
 

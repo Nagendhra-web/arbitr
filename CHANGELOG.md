@@ -196,6 +196,29 @@ All notable changes to this project are recorded here. The format follows
   `assert_not_run`; `FakeTool` and `FakePayments`; `crash_at` and `restart` to
   test a tool's idempotency through a worker crash; and scripted models for
   each framework so an agent loop runs offline.
+- MCP proxy (`arbitr mcp-proxy`, the `mcp` extra) between an MCP client and
+  one MCP server, over stdio or streamable HTTP:
+  - Every call goes through the ledger as `mcp:<server>/<tool>`, in one run
+    per client (the proxy process over stdio, the MCP session over HTTP). A
+    stop comes back as an MCP error result for the model, a server error is
+    recorded as a failure, and a timeout or a connection lost mid-call is an
+    unknown outcome.
+  - Tool pinning: new and changed tool definitions are held, recorded in the
+    audit chain and hidden from the client until accepted with
+    `arbitr mcp pin accept --hash`, bound to the definition that was
+    reviewed. `arbitr mcp pin ls|show` lists them and diffs a held definition
+    against the pinned one, and `verify` checks the pins. A tool too large to
+    pin is held on its own.
+  - Annotations: hints that make a tool stricter always count; hints that
+    would loosen it count only for servers marked `trust_annotations`.
+  - HTTP mode needs bearer tokens, stored as SHA-256 and mapped to a
+    principal and optionally an agent id, and warns when it listens beyond
+    loopback. A stdio server gets only the variables named with
+    `--upstream-env`, and upstream headers can read secrets from the
+    environment.
+  - A worked example with Claude Code in
+    `examples/mcp_proxy_with_claude_code/`, tested step by step.
+- `python -m arbitr` runs the CLI.
 - Examples for every integration, all runnable offline, and a sample test
   suite in `examples/testing_kit/`. The public API is described in
   `docs/design/api.md`, whose examples run in CI.
@@ -210,6 +233,9 @@ All notable changes to this project are recorded here. The format follows
 
 ### Fixed
 
+- An error from a tool whose output is untrusted taints the run the same way
+  a result does, since the error text reaches the agent too (a server could
+  put instructions in it). Only tools that were actually called count.
 - Numeric rule operators (`gt`, `gte`, `lt`, `lte`) read a string that
   spells a finite number as that number, the way tool validators do, so an
   argument sent as `"500"` can no longer slip past a `gt 100` rule.

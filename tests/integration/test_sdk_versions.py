@@ -46,3 +46,14 @@ def test_the_private_langgraph_names_the_adapter_uses_exist() -> None:
     for name in ("_handle_tool_error", "_infer_handled_types", "_default_handle_tool_errors"):
         assert callable(getattr(tool_node, name)), name
     assert hasattr(tool_node.ToolCallRequest, "override")
+
+
+def test_the_mcp_http_era_routing_still_reads_the_version_header() -> None:
+    """The proxy refuses session-less HTTP requests by the same header the SDK routes on."""
+    from mcp.server import streamable_http_manager  # noqa: PLC0415
+    from mcp.shared.inbound import MCP_PROTOCOL_VERSION_HEADER  # noqa: PLC0415
+    from mcp_types.version import HANDSHAKE_PROTOCOL_VERSIONS  # noqa: PLC0415
+
+    assert MCP_PROTOCOL_VERSION_HEADER.lower() == "mcp-protocol-version"
+    assert "MCP_PROTOCOL_VERSION_HEADER" in vars(streamable_http_manager)  # still what it routes on
+    assert "2025-06-18" in HANDSHAKE_PROTOCOL_VERSIONS

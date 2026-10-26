@@ -24,7 +24,7 @@ Example:
     >>> path = pathlib.Path(tempfile.mkdtemp()) / "ledger.db"
     >>> with SQLiteStorage.open(path, Redactor(b"k" * 32)) as db:
     ...     db.schema_version()
-    5
+    6
 """
 
 from __future__ import annotations
@@ -39,10 +39,10 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Final, Self
+from typing import TYPE_CHECKING, Final, Literal, Self
 
 from arbitr.core.audit import Event, VerifyResult, event_hash, genesis_hash, verify_chain
-from arbitr.core.canonical import canonical_json
+from arbitr.core.canonical import canonical_json, sha256_hex
 from arbitr.core.errors import (
     ApprovalError,
     CanonicalizationError,
@@ -96,6 +96,8 @@ _TRANSITION_SQL: Final = (
 )
 _TRANSITION_KINDS: Final = frozenset(s.value.lower() for s in IntentState)
 _RESERVED_KINDS: Final = _TRANSITION_KINDS | {
+    "tool_def_changed",
+    "tool_pin_accepted",
     "run_started",
     "intent_created",
     "budget_reserved",
@@ -263,6 +265,43 @@ class VoteRow:
     roles: str
     note: str | None
     decided_at: str
+
+
+@dataclass(frozen=True)
+class ToolPinRow:
+    """The accepted definition of one MCP tool, by its hash."""
+
+    server: str
+    tool: str
+    definition_hash: str
+    first_seen: str
+    accepted_by: str | None
+    accepted_at: str | None
+    definition: str | None = None
+    """The accepted definition as canonical JSON."""
+
+
+@dataclass(frozen=True)
+class ToolCandidateRow:
+    """A new or changed MCP tool definition, held until someone accepts it."""
+
+    server: str
+    tool: str
+    definition_hash: str
+    definition: str
+    """The definition as canonical JSON, so a reviewer can read exactly what changed."""
+    first_seen: str
+    pinned_hash: str | None
+    """The accepted definition's hash, or None for a tool never accepted."""
+
+
+@dataclass(frozen=True)
+class ToolSeen:
+    """What a listed tool definition is: the pinned one, a new tool, or a change."""
+
+    status: Literal["pinned", "new", "changed"]
+    definition_hash: str
+    pinned_hash: str | None
 
 
 class Transaction:
@@ -1155,6 +1194,142 @@ class Transaction:
         if status == "rejected" or (status == "expired" and state != IntentState.UNKNOWN):
             self.release_reservations(row.intent_id)
 
+    # ------------------------------------------------------------ MCP tool pins
+
+    def see_tool(self, server: str, tool: str, definition: Mapping[str, object]) -> ToolSeen:
+        """Record that ``server`` lists ``tool`` with ``definition``, and say if it is pinned.
+
+        A definition that is not the pinned one is held (replacing any earlier
+        held one) and recorded once as ``tool_def_changed``; listing it again
+        records nothing. Seeing the pinned definition again keeps a held change
+        for review, so a server switching back and forth is recorded once.
+
+        Raises:
+            CanonicalizationError: the definition has no canonical JSON form.
+        """
+        digest = sha256_hex(definition)
+        pin = self.tool_pin(server, tool)
+        if pin is not None and pin.definition_hash == digest:
+            return ToolSeen("pinned", digest, digest)
+        held = self._candidate(server, tool)
+        if held is None or held.definition_hash != digest:
+            self._live().execute(
+                "INSERT INTO tool_candidates (server, tool, definition_hash, definition,"
+                " first_seen) VALUES (?, ?, ?, ?, ?) ON CONFLICT (server, tool) DO UPDATE SET"
+                " definition_hash = excluded.definition_hash, definition = excluded.definition,"
+                " first_seen = excluded.first_seen",
+                (server, tool, digest, canonical_json(definition), self.now),
+            )
+            pinned = pin.definition_hash if pin else None
+            self._append(
+                "tool_def_changed",
+                {"server": server, "tool": tool, "definition_hash": digest, "pinned_hash": pinned},
+                verbatim=True,
+            )
+        return ToolSeen("changed" if pin else "new", digest, pin.definition_hash if pin else None)
+
+    def accept_tool(
+        self,
+        server: str,
+        tool: str,
+        *,
+        accepted_by: str,
+        definition_hash: str | None = None,
+    ) -> ToolPinRow:
+        """Pin the held definition of ``tool`` (the one with ``definition_hash``, if given).
+
+        Raises:
+            StorageError: no new or changed definition is held for the tool, or
+                the held one is not ``definition_hash``.
+        """
+        held = self._candidate(server, tool)
+        if held is None:
+            raise StorageError(
+                f"nothing to accept for {server}/{tool}: no new or changed definition is held"
+            )
+        if definition_hash is not None and definition_hash != held.definition_hash:
+            raise StorageError(
+                f"{definition_hash} is not the held definition of {server}/{tool}"
+                f" ({held.definition_hash})"
+            )
+        previous = self.tool_pin(server, tool)
+        first_seen = previous.first_seen if previous else held.first_seen
+        self._live().execute(
+            "INSERT INTO tool_pins (server, tool, definition_hash, first_seen, accepted_by,"
+            " accepted_at, definition) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (server, tool)"
+            " DO UPDATE SET definition_hash = excluded.definition_hash,"
+            " accepted_by = excluded.accepted_by, accepted_at = excluded.accepted_at,"
+            " definition = excluded.definition",
+            (
+                server,
+                tool,
+                held.definition_hash,
+                first_seen,
+                accepted_by,
+                self.now,
+                held.definition,
+            ),
+        )
+        self._live().execute(
+            "DELETE FROM tool_candidates WHERE server = ? AND tool = ?", (server, tool)
+        )
+        self._append(
+            "tool_pin_accepted",
+            {
+                "server": server,
+                "tool": tool,
+                "definition_hash": held.definition_hash,
+                "previous_hash": previous.definition_hash if previous else None,
+                "accepted_by": accepted_by,
+            },
+            verbatim=True,
+        )
+        pin = self.tool_pin(server, tool)
+        assert pin is not None  # noqa: S101 - written just above
+        return pin
+
+    def tool_pin(self, server: str, tool: str) -> ToolPinRow | None:
+        """The accepted definition of one tool, or None."""
+        row = (
+            self._live()
+            .execute(
+                "SELECT server, tool, definition_hash, first_seen, accepted_by, accepted_at,"
+                " definition FROM tool_pins WHERE server = ? AND tool = ?",
+                (server, tool),
+            )
+            .fetchone()
+        )
+        return ToolPinRow(*row) if row else None
+
+    def tool_pins(self, server: str | None = None) -> list[ToolPinRow]:
+        """Every accepted tool definition (of one server), by server and tool."""
+        sql = (
+            "SELECT server, tool, definition_hash, first_seen, accepted_by, accepted_at,"
+            " definition FROM tool_pins"
+        )
+        params: tuple[str, ...] = ()
+        if server is not None:
+            sql, params = sql + " WHERE server = ?", (server,)
+        rows = self._live().execute(sql + " ORDER BY server, tool", params).fetchall()
+        return [ToolPinRow(*row) for row in rows]
+
+    def tool_candidates(self, server: str | None = None) -> list[ToolCandidateRow]:
+        """Every new or changed definition waiting to be accepted, by server and tool."""
+        sql = (
+            "SELECT c.server, c.tool, c.definition_hash, c.definition, c.first_seen,"
+            " p.definition_hash FROM tool_candidates c LEFT JOIN tool_pins p"
+            " ON p.server = c.server AND p.tool = c.tool"
+        )
+        params: tuple[str, ...] = ()
+        if server is not None:
+            sql, params = sql + " WHERE c.server = ?", (server,)
+        rows = self._live().execute(sql + " ORDER BY c.server, c.tool", params).fetchall()
+        return [ToolCandidateRow(*row) for row in rows]
+
+    def _candidate(self, server: str, tool: str) -> ToolCandidateRow | None:
+        found = [c for c in self.tool_candidates(server) if c.tool == tool]
+        return found[0] if found else None
+
     def approval_votes(self, approval_id: str) -> list[VoteRow]:
         """Every vote on an approval, in the order cast."""
         cur = self._live().execute(
@@ -1533,6 +1708,7 @@ class SQLiteStorage:
             or self._check_runs()
             or self._check_receipts()
             or self._check_approvals()
+            or self._check_tool_pins()
         )
         if problem:
             return VerifyResult(ok=False, checked=chain.checked, reason=problem)
@@ -1606,6 +1782,42 @@ class SQLiteStorage:
                 return f"a vote on approval {approval_id} does not match its recorded event"
         if votes:
             return "an approval vote has an event but no record"
+        return None
+
+    def _check_tool_pins(self) -> str | None:
+        """Every pin and held definition must match the events that recorded it."""
+        pins: dict[tuple[str, str], tuple[object, object]] = {}
+        held: dict[tuple[str, str], object] = {}
+        for event in self.events():
+            if event.kind not in ("tool_def_changed", "tool_pin_accepted"):
+                continue
+            payload = json.loads(event.payload)
+            key = (str(payload.get("server")), str(payload.get("tool")))
+            if event.kind == "tool_def_changed":
+                held[key] = payload.get("definition_hash")
+            else:
+                pins[key] = (payload.get("definition_hash"), payload.get("accepted_by"))
+                held.pop(key, None)
+        for server, tool, digest, accepted_by, definition in self._conn.execute(
+            "SELECT server, tool, definition_hash, accepted_by, definition FROM tool_pins"
+        ):
+            facts = pins.pop((server, tool), None)
+            if facts is None:
+                return f"tool pin {server}/{tool} has no tool_pin_accepted event"
+            if (
+                facts != (digest, accepted_by)
+                or definition is None
+                or sha256_hex(json.loads(definition)) != digest
+            ):
+                return f"tool pin {server}/{tool} does not match its recorded events"
+        if pins:
+            server, tool = sorted(pins)[0]
+            return f"tool pin {server}/{tool} has events but its record is missing"
+        for server, tool, digest, definition in self._conn.execute(
+            "SELECT server, tool, definition_hash, definition FROM tool_candidates"
+        ):
+            if held.get((server, tool)) != digest or sha256_hex(json.loads(definition)) != digest:
+                return f"held tool definition {server}/{tool} does not match its recorded events"
         return None
 
     def _check_runs(self) -> str | None:

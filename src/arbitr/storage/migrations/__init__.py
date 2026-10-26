@@ -162,4 +162,21 @@ CREATE TABLE approval_votes (
 )
 """,
     ),
+    Migration(
+        6,
+        "MCP tool definitions held until accepted, and who accepted each pin",
+        """
+ALTER TABLE tool_pins ADD COLUMN accepted_by TEXT;
+ALTER TABLE tool_pins ADD COLUMN accepted_at TEXT;
+ALTER TABLE tool_pins ADD COLUMN definition TEXT;
+CREATE TABLE tool_candidates (
+  server TEXT NOT NULL,
+  tool TEXT NOT NULL,
+  definition_hash TEXT NOT NULL,
+  definition TEXT NOT NULL,
+  first_seen TEXT NOT NULL,
+  PRIMARY KEY (server, tool)
+)
+""",
+    ),
 )

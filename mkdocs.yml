@@ -25,6 +25,7 @@ nav:
       - Anthropic: integrations/anthropic.md
       - OpenAI Agents: integrations/openai-agents.md
       - LangGraph: integrations/langgraph.md
+      - MCP proxy: integrations/mcp-proxy.md
   - Testing your agent: testing.md
   - Operations: operations/index.md
   - Threat model: THREAT_MODEL.md
