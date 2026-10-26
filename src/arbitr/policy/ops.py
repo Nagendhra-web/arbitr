@@ -6,7 +6,9 @@ Positive operators hold if any matched value satisfies them; ``ne`` and
 nothing satisfies no operator except ``exists: false``.
 
 Equality is JSON equality: ``5`` equals ``5.0``, but ``true`` never equals
-``1`` and a string never equals a number.
+``1`` and a string never equals a number. The numeric comparisons (``gt``,
+``gte``, ``lt``, ``lte``) read a string that spells a finite number as that
+number, the way tool validators do, so ``"500"`` passes ``gt 100``.
 
 Example:
     >>> from arbitr.policy.schema import ArgCondition
@@ -17,6 +19,7 @@ Example:
 from __future__ import annotations
 
 import fnmatch
+import math
 from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Final
 
@@ -50,11 +53,30 @@ def json_equal(a: object, b: object) -> bool:
     return a == b
 
 
+def _as_number(v: object) -> float | None:
+    """A number, or a string that spells a finite one; anything else is None.
+
+    Tool validators (pydantic and the like) turn ``"500"`` into ``500``, so a
+    comparison that ignored such strings would let ``"500"`` pass a ``gt 100``
+    rule and then run as 500.
+    """
+    if _is_number(v):
+        return float(v)  # type: ignore[arg-type]
+    if isinstance(v, str):
+        try:
+            number = float(v)
+        except ValueError:
+            return None
+        return number if math.isfinite(number) else None
+    return None
+
+
 def _compare(op: str) -> Callable[[object, object], bool]:
     def check(v: object, target: object) -> bool:
-        if not (_is_number(v) and _is_number(target)):
+        a = _as_number(v)
+        if a is None or not _is_number(target):
             return False
-        a, b = float(v), float(target)  # type: ignore[arg-type]
+        b = float(target)  # type: ignore[arg-type]
         return {"gt": a > b, "gte": a >= b, "lt": a < b, "lte": a <= b}[op]
 
     return check

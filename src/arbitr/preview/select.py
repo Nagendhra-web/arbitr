@@ -25,7 +25,7 @@ from arbitr.preview.base import Preview, Previewer, run_preview
 from arbitr.preview.email import preview_email
 from arbitr.preview.files import preview_files
 from arbitr.preview.payments import preview_payments
-from arbitr.preview.sql import changes_rows, preview_sql
+from arbitr.preview.sql import DIALECT, changes_rows, preview_sql
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
@@ -92,7 +92,7 @@ def preview_action(  # noqa: PLR0913 - the parts of one action, plus the two set
                 error=type(exc).__name__,
             )
     else:
-        found = _builtin_for(effect, list(resources), args)
+        found = _builtin_for(effect, list(resources), args, context)
         if found is None:
             return None
         previewer = found
@@ -100,14 +100,22 @@ def preview_action(  # noqa: PLR0913 - the parts of one action, plus the two set
 
 
 def _builtin_for(
-    effect: str, resources: list[ResourceRef], args: Mapping[str, object]
+    effect: str,
+    resources: list[ResourceRef],
+    args: Mapping[str, object],
+    context: Mapping[str, object],
 ) -> Previewer | None:
     if effect in PREVIEW_EFFECTS:
         return default_previewer(effect, resources)
     kinds = {r.kind for r in resources}
     # Any write whose SQL changes rows is previewed. One the previewer cannot
     # count gives a failed preview, so a preview rule fails safe, never open.
-    if effect == "write" and "table" in kinds and changes_rows(args):
+    dialect = context.get(DIALECT)
+    if (
+        effect == "write"
+        and "table" in kinds
+        and changes_rows(args, dialect if isinstance(dialect, str) else None)
+    ):
         return preview_sql
     if effect == "external_comm" and "email" in kinds:
         return preview_email

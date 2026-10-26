@@ -395,3 +395,43 @@ def test_resource_count_needs_a_kind_and_a_non_negative_value() -> None:
                 "version: 1\nrules:\n  - id: r\n    when: { resource_count_gt: " + bad + " }\n"
                 "    then: deny\n    reason: x\n"
             )
+
+
+@pytest.mark.parametrize(
+    ("value", "op", "target", "expected"),
+    [
+        ("500", "gt", 100, True),  # a tool's validator turns "500" into 500
+        (" 500 ", "gte", 500, True),
+        ("1e3", "gt", 100, True),
+        ("1_000", "gt", 999, True),
+        ("-5", "lt", 0, True),
+        ("99.5", "lte", 100, True),
+        ("50", "gt", 100, False),
+        ("abc", "gt", 1, False),
+        ("nan", "gt", 1, False),
+        ("inf", "gt", 1, False),
+        ("", "gt", -1, False),
+        (True, "gt", 0, False),
+    ],
+)
+def test_numeric_comparisons_read_numeric_strings_as_numbers(
+    value: object, op: str, target: float, expected: bool
+) -> None:
+    assert (
+        evaluate(ArgCondition(path="$.amount", op=op, value=target), {"amount": value}) is expected
+    )
+
+
+def test_a_numeric_string_cannot_slip_past_an_approval_threshold() -> None:
+    policy = load_policy("""
+version: 1
+default: { financial: allow }
+rules:
+  - id: big-refunds
+    when: { tool: payments.refund, args: [{ path: "$.amount", op: gt, value: 100 }] }
+    then: require_approval
+    reason: Refunds over 100 need a human.
+""")
+    for amount in (500, "500", "5e2"):
+        result = decide(gate("payments.refund", "financial", {"amount": amount}), policy, {})
+        assert result.outcome == "require_approval", amount

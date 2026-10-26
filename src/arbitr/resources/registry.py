@@ -230,6 +230,33 @@ def _walk(args: Mapping[str, object]) -> Extraction:
     return result
 
 
+def sql_texts(args: Mapping[str, object]) -> tuple[list[object], bool]:
+    """Every value the SQL extractor reads in ``args``, and whether the walk saw all of them.
+
+    The same walk as resource extraction (nested objects and lists, every SQL
+    key), so a previewer and the extractor never disagree about where SQL is.
+    Values are returned as found; ones that are not text cannot be checked.
+    The walk is incomplete when the arguments are too large or too deep.
+    """
+    found: list[object] = []
+    stack: list[tuple[str, object, int]] = [("", args, 0)]
+    seen = 0
+    while stack:
+        key, value, depth = stack.pop()
+        seen += 1
+        if seen > _MAX_NODES or depth > _MAX_DEPTH:
+            return found, False
+        is_sql = key in _SQL_KEYS or key.endswith("_sql")
+        if isinstance(value, Mapping):
+            stack.extend((str(k).lower(), v, depth + 1) for k, v in value.items())
+        elif isinstance(value, list | tuple):
+            stack.extend((key, v, depth + 1) for v in value)
+        elif is_sql:
+            found.append(value)
+    found.reverse()  # the stack walks backwards; keep the order the arguments give
+    return found, True
+
+
 # ---------------------------------------------------------------- custom extractors
 
 

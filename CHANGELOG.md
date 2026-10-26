@@ -162,6 +162,16 @@ All notable changes to this project are recorded here. The format follows
 
 ### Fixed
 
+- Numeric rule operators (`gt`, `gte`, `lt`, `lte`) read a string that
+  spells a finite number as that number, the way tool validators do, so an
+  argument sent as `"500"` can no longer slip past a `gt 100` rule.
+- Row-count previews fail closed in more cases: SQL nested anywhere in the
+  arguments is found the way resource extraction finds it, a read that calls
+  a function the parser does not know counts as a change, detection parses
+  with the configured dialect, and a write that touches a table with no SQL
+  found gets a failed preview. SQL with comments, or with no statement, counts
+  as a change. Counts on other databases run under a server-side time limit,
+  and a database that takes none is not counted.
 - A spend amount given as true or false is outside a run's spend limit
   instead of being checked as 1 and never charged.
 - A retried action that never had its cancel window needs approval instead of

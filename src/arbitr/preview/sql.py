@@ -35,6 +35,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 
 from arbitr.preview.base import DEADLINE, Preview, plural
+from arbitr.resources.registry import sql_texts
 
 try:
     import sqlglot
@@ -50,8 +51,8 @@ if TYPE_CHECKING:
 CONNECTION: Final = "sql_connection"
 DIALECT: Final = "sql_dialect"
 
-_SQL_KEYS: Final = frozenset({"sql", "query", "statement", "sql_query", "raw_sql"})
-_LIST_KEYS: Final = frozenset({"statements"})
+_DEFAULT_LIMIT_S: Final = 2.0
+"""The server-side time limit for a count when the preview has no deadline."""
 _TABLE_PARTS: Final = frozenset({"this", "db", "catalog", "alias"})
 _PROGRESS_STEPS: Final = 1000
 
@@ -128,7 +129,7 @@ def _whole_tables(verb: str, tables: list[object], dialect: str | None) -> Count
 def _parse_one(sql: str, dialect: str | None) -> exp.Expr:
     if not _PARSER:  # pragma: no cover - sqlglot is the optional "sql" extra
         raise Unsupported("the sql extra (sqlglot) is not installed")
-    if "--" in sql or "/*" in sql or ("#" in sql and dialect in (None, "mysql")):
+    if _has_comment(sql, dialect):
         # A database may read a comment differently from the parser (MySQL runs
         # /*! ... */), so the count could measure another WHERE clause.
         raise Unsupported("statements with comments cannot be previewed safely")
@@ -170,27 +171,42 @@ def count_plan(sql: str, dialect: str | None = None) -> CountPlan:
 _CHANGE_WORD: Final = re.compile(r"\b(delete|update|drop|truncate|merge|replace)\b", re.IGNORECASE)
 
 
-def changes_rows(args: Mapping[str, object]) -> bool:
+def changes_rows(args: Mapping[str, object], dialect: str | None = None) -> bool:
     """Whether any SQL in the arguments may change rows or the schema. Fails closed.
 
-    Only plain reads (SELECT without INTO) and plain INSERTs count as not
-    changing rows. Everything else does: DELETE, UPDATE, upserts, REPLACE,
-    CALL, statements the parser does not recognize, and text that does not
-    parse. Without the parser, a changing keyword is enough.
+    Only plain reads (SELECT without INTO, calling only functions the parser
+    knows) and plain INSERTs count as not changing rows. Everything else does:
+    DELETE, UPDATE, upserts, REPLACE, CALL, unknown functions (a user function
+    or ``setval`` can write), statements the parser does not recognize, text
+    that does not parse or holds no statement, comments (MySQL runs
+    ``/*! ... */``), SQL that is not text, and arguments with no SQL found or
+    too large to walk. SQL is found the way resource extraction finds it,
+    at any depth. Without the parser, a changing keyword is enough.
     """
-    texts = [v for v in _sql_values(args) if isinstance(v, str)]
-    for text in texts:
+    values, complete = sql_texts(args)
+    if not complete or not values or not all(isinstance(v, str) for v in values):
+        return True
+    for text in values:
+        assert isinstance(text, str)  # noqa: S101 - checked above, for the type checker
+        if _has_comment(text, dialect):
+            return True  # the database may run what the parser reads as a comment
         if not _PARSER:
             if _CHANGE_WORD.search(text):
                 return True
             continue
         try:
-            trees = sqlglot.parse(text)
+            trees = sqlglot.parse(text, read=dialect)
         except Exception:  # noqa: BLE001 - text that does not parse may change anything
             return True
-        if not all(tree is None or _leaves_rows_alone(tree) for tree in trees):
+        statements = [tree for tree in trees if tree is not None]
+        if not statements or not all(_leaves_rows_alone(tree) for tree in statements):
             return True
     return False
+
+
+def _has_comment(sql: str, dialect: str | None) -> bool:
+    """Whether the text holds a comment, which a database may read differently from the parser."""
+    return "--" in sql or "/*" in sql or ("#" in sql and dialect in (None, "mysql"))
 
 
 def _leaves_rows_alone(tree: exp.Expr) -> bool:
@@ -198,6 +214,8 @@ def _leaves_rows_alone(tree: exp.Expr) -> bool:
     kinds = (exp.Delete, exp.Update, exp.Drop, exp.TruncateTable, exp.Merge, exp.Command)
     if any(tree.find_all(*kinds)):
         return False
+    if any(tree.find_all(exp.Anonymous)):
+        return False  # a function the parser does not know may write (setval, a user function)
     if isinstance(tree, exp.Select | exp.Union | exp.Intersect | exp.Except):
         return tree.args.get("into") is None
     if isinstance(tree, exp.Insert):
@@ -214,19 +232,10 @@ def can_count(args: Mapping[str, object]) -> bool:
     return True
 
 
-def _sql_values(args: Mapping[str, object]) -> list[object]:
-    found: list[object] = []
-    for key, value in args.items():
-        name = str(key).lower()
-        if name in _SQL_KEYS or name.endswith("_sql"):
-            found.append(value)
-        elif name in _LIST_KEYS and isinstance(value, list | tuple):
-            found.extend(value)
-    return found
-
-
 def _statement(args: Mapping[str, object]) -> str:
-    found = _sql_values(args)
+    found, complete = sql_texts(args)
+    if not complete:
+        raise Unsupported("the arguments are too large to search for SQL")
     if not found:
         raise Unsupported("no SQL statement was found in the arguments")
     if len(found) != 1 or not isinstance(found[0], str):
@@ -274,7 +283,7 @@ def _run(plan: CountPlan, context: Mapping[str, object]) -> list[int]:
             raise Unsupported(
                 "for this database the preview needs a connection factory, not a shared connection"
             )
-        return _count_read_only(conn, plan)
+        return _count_read_only(conn, plan, context)
     finally:
         if owned:
             conn.close()
@@ -295,7 +304,7 @@ def _count_sqlite(
         conn.execute(f"PRAGMA query_only = {before}")
 
 
-def _count_read_only(conn: Any, plan: CountPlan) -> list[int]:  # noqa: ANN401 - any DB-API
+def _count_read_only(conn: Any, plan: CountPlan, context: Mapping[str, object]) -> list[int]:  # noqa: ANN401 - any DB-API
     """Count inside a read-only transaction, and always roll it back."""
     try:
         cursor = conn.cursor()
@@ -306,9 +315,33 @@ def _count_read_only(conn: Any, plan: CountPlan) -> list[int]:  # noqa: ANN401 -
         if not _read_only_confirmed(conn):
             # On an autocommit connection the setting can silently do nothing.
             raise Unsupported("the database did not confirm a read-only transaction")
+        if not _limit_time(conn, context):
+            # Without it, a slow count would keep running on the server after
+            # the preview gave up on it.
+            raise Unsupported("the database did not accept a time limit for the count")
         return [_count(conn, q) for q in plan.queries]
     finally:
         conn.rollback()
+
+
+def _limit_time(conn: Any, context: Mapping[str, object]) -> bool:  # noqa: ANN401 - any DB-API
+    """Set a server-side time limit for this transaction's queries (Postgres, then MySQL)."""
+    deadline = context.get(DEADLINE)
+    left = deadline - time.monotonic() if isinstance(deadline, float) else _DEFAULT_LIMIT_S
+    millis = max(1, int(left * 1000))
+    for query in (
+        f"SET LOCAL statement_timeout = {millis}",
+        f"SET SESSION max_execution_time = {millis}",
+    ):
+        cursor = conn.cursor()
+        try:
+            cursor.execute(query)
+        except Exception:  # noqa: BLE001, S112 - this database does not know the setting
+            continue
+        finally:
+            cursor.close()
+        return True
+    return False
 
 
 def _read_only_confirmed(conn: Any) -> bool:  # noqa: ANN401 - any DB-API connection

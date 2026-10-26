@@ -117,3 +117,74 @@ def test_only_plain_reads_and_inserts_count_as_not_changing_rows(sql: str, chang
     from arbitr.preview.sql import changes_rows  # noqa: PLC0415
 
     assert changes_rows({"sql": sql}) is changes
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        {"request": {"sql": "DELETE FROM orders"}},
+        {"batch": {"statements": ["SELECT 1", "DELETE FROM orders"]}},
+        {"jobs": [{"query": "UPDATE orders SET status = 'x'"}]},
+        {"payload": {"options": {"raw_sql": "DROP TABLE orders"}}},
+    ],
+)
+def test_sql_found_anywhere_the_extractor_looks_is_checked(args: dict[str, object]) -> None:
+    from arbitr.preview.sql import changes_rows  # noqa: PLC0415
+
+    assert changes_rows(args) is True
+
+
+def test_a_table_with_no_sql_found_fails_closed() -> None:
+    from arbitr.preview.sql import changes_rows  # noqa: PLC0415
+
+    assert changes_rows({}) is True
+    assert changes_rows({"sql": 5}) is True  # not text: cannot be checked
+
+
+@pytest.mark.parametrize(
+    ("sql", "changes"),
+    [
+        ("SELECT setval('orders_id_seq', 1)", True),
+        ("SELECT my_cleanup(42)", True),
+        ("SELECT pg_terminate_backend(1234)", True),
+        ("SELECT COUNT(*), MAX(id), UPPER(name) FROM orders", False),
+    ],
+)
+def test_reads_that_call_unknown_functions_count_as_changes(sql: str, changes: bool) -> None:
+    from arbitr.preview.sql import changes_rows  # noqa: PLC0415
+
+    assert changes_rows({"sql": sql}) is changes
+
+
+def test_detection_parses_with_the_configured_dialect() -> None:
+    from arbitr.preview.sql import changes_rows  # noqa: PLC0415
+
+    # Backticks quote names in MySQL; the generic dialect cannot read them as a read.
+    assert changes_rows({"sql": "SELECT `id` FROM `orders`"}, "mysql") is False
+
+
+def test_arguments_too_deep_to_walk_fail_closed() -> None:
+    from arbitr.preview.sql import changes_rows, preview_sql  # noqa: PLC0415
+
+    nested: dict[str, object] = {"sql": "SELECT 1"}
+    for _ in range(80):
+        nested = {"inner": nested}
+    assert changes_rows(nested) is True
+    assert "too large" in preview_sql(nested, {}).summary
+
+
+@pytest.mark.parametrize(
+    ("sql", "dialect"),
+    [
+        ("SELECT 1 /*! ; DELETE FROM orders */", None),
+        ("SELECT 1 /*!50000 , (DELETE FROM orders) */", "mysql"),
+        ("SELECT id FROM orders -- ; DROP TABLE orders", None),
+        ("SELECT id FROM orders # ; DROP TABLE orders", "mysql"),
+        ("", None),
+        ("   ;  ", None),
+    ],
+)
+def test_comments_and_empty_statements_count_as_changes(sql: str, dialect: str | None) -> None:
+    from arbitr.preview.sql import changes_rows  # noqa: PLC0415
+
+    assert changes_rows({"sql": sql}, dialect) is True

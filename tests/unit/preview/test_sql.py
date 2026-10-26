@@ -338,3 +338,68 @@ def test_a_read_only_transaction_is_confirmed_before_counting(flag: object, ok: 
 
     preview = preview_sql({"sql": "DELETE FROM items WHERE id > 3"}, {CONNECTION: connect})
     assert preview.ok is ok
+
+
+def test_nested_sql_is_previewed(db: Path) -> None:
+    conn = sqlite3.connect(db)
+    try:
+        preview = preview_sql(
+            {"request": {"sql": "DELETE FROM items WHERE id > 3"}}, {CONNECTION: conn}
+        )
+    finally:
+        conn.close()
+    assert preview.ok
+
+
+def _recording(statements: list[str], refuse: tuple[str, ...] = ()) -> object:
+    class Cursor:
+        def execute(self, sql: str) -> None:
+            statements.append(sql)
+            if sql.startswith(refuse):
+                raise RuntimeError("not supported here")
+
+        def fetchone(self) -> tuple[object]:
+            return ("on",) if statements[-1].startswith("SHOW") else (7,)
+
+        def close(self) -> None:
+            pass
+
+    class Conn:
+        def cursor(self) -> Cursor:
+            return Cursor()
+
+        def rollback(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    return Conn()
+
+
+def test_other_databases_get_a_server_side_time_limit_before_counting() -> None:
+    statements: list[str] = []
+    context = {CONNECTION: lambda: _recording(statements), DEADLINE: time.monotonic() + 2}
+    preview = preview_sql({"sql": "DELETE FROM items WHERE id > 3"}, context)
+    assert preview.ok
+    limit = next(i for i, s in enumerate(statements) if "statement_timeout" in s)
+    count = next(i for i, s in enumerate(statements) if s.startswith("SELECT COUNT"))
+    assert limit < count
+    assert statements[limit].startswith("SET LOCAL statement_timeout = ")
+
+
+def test_mysql_gets_its_own_time_limit() -> None:
+    statements: list[str] = []
+    connect = lambda: _recording(statements, refuse=("SET LOCAL",))  # noqa: E731
+    preview = preview_sql({"sql": "DELETE FROM items WHERE id > 3"}, {CONNECTION: connect})
+    assert preview.ok
+    assert any(s.startswith("SET SESSION max_execution_time = ") for s in statements)
+
+
+def test_a_database_that_takes_no_time_limit_is_not_counted() -> None:
+    statements: list[str] = []
+    connect = lambda: _recording(statements, refuse=("SET LOCAL", "SET SESSION"))  # noqa: E731
+    preview = preview_sql({"sql": "DELETE FROM items WHERE id > 3"}, {CONNECTION: connect})
+    assert not preview.ok
+    assert "time limit" in preview.summary
+    assert not any(s.startswith("SELECT COUNT") for s in statements)

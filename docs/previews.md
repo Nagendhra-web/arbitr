@@ -198,10 +198,20 @@ when the action was not previewed. Because the event is part of the chain,
 - Errors are recorded by type only; their text can carry data the previewer
   read.
 - Which SQL counts as changing rows fails closed: only plain reads (`SELECT`
-  without `INTO`) and plain `INSERT`s do not. Upserts, `REPLACE`, `CALL`,
-  statements the parser does not recognize and text that does not parse are
-  all previewed, and fail the preview when they cannot be counted.
+  without `INTO`, calling only functions the parser knows) and plain
+  `INSERT`s do not. Upserts, `REPLACE`, `CALL`, unknown functions (a user
+  function or `setval` can write), statements the parser does not recognize,
+  text that does not parse or holds no statement, and SQL with comments
+  (MySQL runs `/*! ... */`) are all previewed, and fail the preview when they
+  cannot be counted. Detection parses with `sql_dialect`.
+- SQL is found the way resource extraction finds it: under any SQL key, at
+  any depth, in nested objects and lists. A write that touches a table but
+  has no SQL text Arbitr can read gets a failed preview.
 - On databases other than SQLite the preview asks the database to confirm
   the transaction is read-only (`SHOW transaction_read_only`, or
   `SELECT @@transaction_read_only`) and refuses to count if it cannot.
+- Counts on databases other than SQLite run under a server-side time limit
+  taken from the preview's deadline (`SET LOCAL statement_timeout` on
+  Postgres, `SET SESSION max_execution_time` on MySQL). A database that
+  accepts neither is not counted, so a slow count never outlives the preview.
 
